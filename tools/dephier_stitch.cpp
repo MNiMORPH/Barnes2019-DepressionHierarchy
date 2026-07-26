@@ -112,6 +112,11 @@ int main(int argc, char **argv){
   };
 
   // ---- per-tile: pre-label seam-crossing edges BOUNDARY, then PhaseAB ----
+  // gFlow is the one authoritative drainage map: the flood's own flowdirs, assembled
+  // globally. Everything downhill (conduit resolution) follows it, so drainage is
+  // internally consistent with the flood -- including flats, where the flood's
+  // deterministic order (radix_heap bucket sort) fixes the direction.
+  rd::Array2D<int8_t> gFlow(full.width(), full.height(), rd::NO_FLOW);
   std::vector<Tile<float>> tiles(ntiles);
   dh_label_t next_offset = 1;
   for(int t=0;t<ntiles;t++){
@@ -136,6 +141,9 @@ int main(int argc, char **argv){
 
     rd::Array2D<int8_t> fd(tile.dem.width(), tile.dem.height(), rd::NO_FLOW);
     dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(tile.dem, tile.label, fd, tile.deps, tile.outlets);
+    for(int y=0;y<tile.dem.height();y++)                 // assemble the global flowdir map
+      for(int x=0;x<tile.dem.width();x++)
+        gFlow(tile.x0 + x, y) = fd(x, y);
     tile.offset = next_offset;
     next_offset += tile.deps.size() - 1;
   }
@@ -162,22 +170,33 @@ int main(int argc, char **argv){
         gLabel(tile.x0 + x, y) = tile.g(tile.label(x, y));
 
   // ---- conduit resolution: every BOUNDARY cell adopts the depression it drains
-  // into. Resolve lowest-first, so each cell's steepest-descent neighbour (which is
-  // strictly lower) is already a real label. ----
+  // into, by FOLLOWING THE FLOOD'S FLOWDIRS (gFlow) -- the same drainage map as the
+  // flood, so it is flat-consistent by construction -- all the way to a real terminal
+  // (a depression or the ocean). A seam-edge BOUNDARY seed has NO_FLOW (its downstream
+  // is across the seam), so there we cross via the lowest cross-seam neighbour. Order-
+  // independent: resolutions are computed from the original labels, then applied. ----
   {
-    std::vector<std::pair<float,int>> bcells;   // (elev, flat index)
+    const auto terminal = [&](int x, int y)->dh_label_t {
+      for(unsigned int guard=0; guard<=full.size(); guard++){
+        const auto l = gLabel(x,y);
+        if(l!=BOUNDARY) return l;                          // reached a depression or ocean
+        const int fd = gFlow(x,y);
+        if(fd!=rd::NO_FLOW){ x += rd::d8x[fd]; y += rd::d8y[fd]; }
+        else {                                             // seam seed: cross the seam
+          int lx,ly; bool to_ocean;
+          if(!drain(x,y,lx,ly,to_ocean) || to_ocean) return OCEAN;
+          x=lx; y=ly;
+        }
+      }
+      return OCEAN;                                        // safety net (no cycle expected)
+    };
+    std::vector<std::pair<int,int>> bcells;
     for(int y=0;y<full.height();y++)
       for(int x=0;x<full.width();x++)
-        if(gLabel(x,y)==BOUNDARY)
-          bcells.emplace_back(full(x,y), full.xyToI(x,y));
-    std::sort(bcells.begin(), bcells.end());
-    for(auto &bc : bcells){
-      int x,y; full.iToxy(bc.second, x, y);
-      int lx,ly; bool to_ocean;
-      const bool found = drain(x,y,lx,ly,to_ocean);
-      if(to_ocean || !found) gLabel(x,y) = OCEAN;          // drains to the sea
-      else                   gLabel(x,y) = gLabel(lx,ly);  // drains into a depression
-    }
+        if(gLabel(x,y)==BOUNDARY) bcells.emplace_back(x,y);
+    std::vector<dh_label_t> resolved(bcells.size());
+    for(size_t i=0;i<bcells.size();i++) resolved[i] = terminal(bcells[i].first, bcells[i].second);
+    for(size_t i=0;i<bcells.size();i++) gLabel(bcells[i].first, bcells[i].second) = resolved[i];
   }
 
   // ---- global outlet set, in the distributable shape (Barnes' join): each tile
