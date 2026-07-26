@@ -235,12 +235,20 @@ It did not arise in any validated case — see below.)*
 `tools/dephier_stitch.cpp`, run after `PhaseCD`. The concrete trigger was a **seam-straddling flat**:
 the fractal `--size 200 --beta 1.7 --seed 4` DEM at split 142, tie `{(141,182),(142,183)}=633.752`
 draining out via `(142,183)→(143,183)` — one tile sees its half as a zero-height pit, ocean-linked into
-its real container. **1446/1447** tiled-vs-serial cases MATCH (benign fixtures + multi-seam sweeps +
-exhaustive single-seam over fractal terrains, β 1.3–2.5, seeds 1–15; ≈2 artifacts per ~1600 runs,
-matching the 1/195 estimate; **zero over-collapses, zero binary-child forms**). The lone DIFFER is a
-*separate*, pre-existing residual — a seam-edge flat **cell reassignment** (same node counts; one
-boundary cell joins a different existing basin in the tiled flood), a flood-determinism-across-seam
-effect, not an artifact node (the collapse correctly no-ops on it).
+its real container. The pass leaves genuine basins untouched (**zero over-collapses, zero binary-child
+forms**; ≈2 artifacts per ~1600 runs, matching the 1/195 estimate).
+
+**The stitch now reproduces serial BIT-IDENTICALLY on every tested case: 1447/1447 MATCH**, 0 DIFFER
+(benign fixtures + multi-seam sweeps + exhaustive single-seam over fractal terrains, β 1.3–2.5, seeds
+1–15). Reaching 0 DIFFER took one fix *outside* this collapse pass: a **seam-divide tie**. A cell with
+two equal-lowest neighbours, one in each tile (`s5 β1.7 @140`: `(139,159)`, neighbours `(138,158)` and
+`(140,160)` both `243.151993`), is claimed by the serial flood from its **highest-index** neighbour
+(the radix heap pops equal-elevation cells highest-index-first), which here is across the seam. The
+BOUNDARY pre-labelling's `drain()` had broken that tie the other way, keeping the cell in-tile. Aligning
+`drain()`'s tie-break with the flood (lowest neighbour, ties by highest cell index) routes it across and
+closes the case — the same "use the flood's own rule for everything" principle as the flowdir conduit
+resolution. The collapse (seam-straddling *flats*) and this tie-break fix (strict-downhill *divide ties*
+at the seam) are complementary.
 
 **Caveat (footnote, not a blocker):** per-cell `flowdirs` near a cut differ from serial (tile-s cells
 point to the boundary pit, not across the line). This is irrelevant to pooled-water / FSM behaviour,
@@ -397,10 +405,10 @@ way — a "does not fit" result is the finding that redirects the architecture.
   pathology** — vast flats spanning many tiles (flats become many pit cells, `dephier.hpp:356–361`,
   inflating boundary outlets) is a real-DEM artifact (quantization, flattened lakes, no-data) that a
   continuous spectral field essentially never produces. Flats must be measured on real tiles (or a
-  purpose-built flat fixture). §3.2's collapse now folds the equal-elevation flat *straddling a seam*;
-  the residual this stresses is the *other* seam-flat effect — a boundary flat cell reassigned to a
-  different basin by the tiled flood (the one remaining validation DIFFER), which needs seam-aware
-  flat handling in the flood itself.
+  purpose-built flat fixture). §3.2's collapse folds the equal-elevation flat *straddling a seam*, and
+  the seam-divide tie-break fix (see §3.2 status) handles boundary cells whose tied steepest descent
+  crosses the seam; together these took the fractal sweep to 0 DIFFER. What real tiles still stress is
+  *vast* flats (many pit cells, inflated boundary outlets) that a continuous spectral field never makes.
 
 ---
 
