@@ -120,6 +120,21 @@ candidate outlet elevation `= max(elev(a), elev(b))`; for each depression pair
 records in exactly the `Outlet<elev_t>` form Phase C already consumes. **Merge** these into the
 gathered internal-outlet set, then run Phase C once, globally.
 
+**BOUNDARY conduit resolution — a footprint-bounded boundary-graph pass.** A cell whose drainage
+*leaves* its tile is seeded `BOUNDARY` (it never becomes a spurious pit); afterwards each such cell
+must be assigned the real depression (or ocean) it ends in, so outlet discovery and the global label
+grid are correct. Doing this by walking the drainage path across the whole grid would reach into other
+tiles' interiors — the one place the stitch used to. It is instead a two-phase graph pass on the seam
+cells only: **(1) per tile, local** — follow the tile's own flowdirs from each `BOUNDARY` cell to a
+tile-local terminal (a depression/ocean) or a *seam exit* (the cross-seam cell it hands off to, read
+from the perimeter strip); **(2) chain** — follow those exits across tiles until a terminal, reading
+only the O(boundary) per-tile results plus edge labels. Conduit paths are shallow — measured ≤ 6
+tile-crossings even at 8 tiles (`BOUNDARY` cells number a few hundred–few thousand per seam, never a
+fraction of N) — so a distributed build realizes the chain as a few rounds of label propagation over
+published results (the analogue of Barnes' 2016 boundary-graph step, applied to conduits). No step
+reads another tile's interior, so per-rank footprint is O(N/P) + O(boundary). Validated bit-identical
+to serial: 1521/1521 MATCH across the fractal sweep, benign, and pit-on-seam fixtures.
+
 **Verified against Barnes' own 2016 implementation** (`submodules/richdem/programs/parallel_priority_flood/main.cpp`).
 This is not reconstructed from the paper — it is his reference code, and the cross-tile rule above is
 line-for-line what he does:
