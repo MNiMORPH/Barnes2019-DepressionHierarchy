@@ -184,6 +184,13 @@ const dh_label_t NO_DEP = std::numeric_limits<dh_label_t>::max();
 //Cell is part of the ocean and a place from which we begin searching for
 //depressions.
 const dh_label_t OCEAN  = 0;
+//Cell drains off a tile edge in a distributed build: a provisional exterior
+//("BOUNDARY") that seeds and spreads like the ocean during the flood but is NOT a
+//terminal sink -- the stitch reconciles it across tiles (PARALLEL_DEPHIER_PLAN.md).
+//Reserved just below the NO_DEP/NO_VALUE sentinel so it disturbs neither OCEAN nor
+//the depression numbering. A serial run's input contains no BOUNDARY cells, so
+//serial output is unchanged.
+const dh_label_t BOUNDARY = std::numeric_limits<dh_label_t>::max() - 1;
 
 template<typename elev_t>
 using DepressionHierarchy = std::vector<Depression<elev_t>>;
@@ -310,34 +317,38 @@ void GetDepressionHierarchyPhaseAB(
   //We assume the user has already specified a few ocean cells from which to
   //begin looking for depressions. We add all of these ocean cells to the
   //priority queue now.
-  uint64_t ocean_cells = 0;
-  #pragma omp parallel for collapse(2) reduction(+:ocean_cells) reduction(merge:ocean_seeds)
+  //Exterior cells -- the ocean (a terminal sink) and, in a distributed build,
+  //BOUNDARY (a provisional tile-edge sink) -- seed the flood. We add an exterior
+  //cell to the priority queue if it borders an interior (NO_DEP) cell, i.e. it is
+  //on the flood front. A serial run has no BOUNDARY cells, so this is exactly the
+  //original ocean-seeding.
+  uint64_t exterior_cells = 0;
+  #pragma omp parallel for collapse(2) reduction(+:exterior_cells) reduction(merge:ocean_seeds)
   for(int y=0;y<dem.height();y++)
   for(int x=0;x<dem.width();x++){
-    //Ensure the input only has OCEAN and NO_DEP labels.
-    if(label(x,y)!=OCEAN){
-      if(label(x,y)!=NO_DEP){
-        throw std::runtime_error("Label array given to GetDepressionHierarchy must contain only NO_DEP and OCEAN labels!");
-      }
+    const auto l = label(x,y);
+    if(l==NO_DEP)                  //Interior cell: seeded later as a pit if it can't drain
       continue;
+    if(l!=OCEAN && l!=BOUNDARY){   //Only NO_DEP, OCEAN, and BOUNDARY are permitted
+      throw std::runtime_error("Label array given to GetDepressionHierarchy must contain only NO_DEP, OCEAN, and BOUNDARY labels!");
     }
 
-    //We'll only add ocean cells to the PQ if they border a non-ocean cell
-    bool has_non_ocean = false;
+    //Add the exterior cell to the PQ if it borders an interior (NO_DEP) cell
+    bool borders_interior = false;
     for(int n=1;n<=neighbours;n++){
-      if(label.inGrid(x+dx[n],y+dy[n]) && label(x+dx[n],y+dy[n])!=OCEAN){
-        has_non_ocean = true;
+      if(label.inGrid(x+dx[n],y+dy[n]) && label(x+dx[n],y+dy[n])==NO_DEP){
+        borders_interior = true;
         break;
       }
     }
-    if(has_non_ocean){       //If they are ocean cells, put them in the priority queue
+    if(borders_interior){
       ocean_seeds.emplace_back(dem.xyToI(x,y));
-      ocean_cells++;
+      exterior_cells++;
     }
   }
 
-  if(ocean_cells==0){
-    throw std::runtime_error("No OCEAN cells found, could not make a DepressionHierarchy!");
+  if(exterior_cells==0){
+    throw std::runtime_error("No OCEAN or BOUNDARY cells found, could not make a DepressionHierarchy!");
   }
 
   //The 0th depression is the ocean. We add it to the list of depressions now
@@ -369,7 +380,7 @@ void GetDepressionHierarchyPhaseAB(
   for(int y=0;y<dem.height();y++)  //Look at all the cells
   for(int x=0;x<dem.width() ;x++){ //Yes, all of them
     ++progress;
-    if(label(x,y)==OCEAN)          //Already in priority queue
+    if(label(x,y)==OCEAN || label(x,y)==BOUNDARY)  //Exterior: already in priority queue
       continue;
     const auto my_elev = dem(x,y); //Focal cell's elevation
     bool has_lower     = false;    //Pretend we have no lower neighbours
