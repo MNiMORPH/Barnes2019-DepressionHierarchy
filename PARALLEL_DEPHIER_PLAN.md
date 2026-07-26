@@ -186,70 +186,61 @@ contracts each split bowl back to one leaf identical to the serial one.
 
 **Collapse criterion — the load-bearing detail.** "The connecting outlet lies on a tile boundary" is
 **necessary but not sufficient**: two genuinely distinct bowls whose real saddle happens to fall on the
-tile line form a *true* meta-depression that must **not** be collapsed. The distinguishing local
-signal comes straight from the pit test (`dephier.hpp:372–388` checks in-grid neighbours only):
+tile line form a *true* meta-depression that must **not** be collapsed. What singles out the artifact is
+that the tiling manufactured a **degenerate, zero-height depression** — one whose pit and outlet sit at
+the same elevation because the local flood could not see the escape across the seam:
 
-> A leaf is a **tile-cut artifact** iff its pit cell sits on a tile edge **and has a strictly-lower
-> neighbour across that edge**. A monotonic slope crossing the tile line produces such a spurious pit;
-> a real saddle-on-the-line does not (its pits are interior local minima). Collapse only meta-nodes
-> whose children reduce to artifact leaves linked by such monotonic crossings; keep meta-nodes over
-> real depressions even when their saddle lies on the boundary.
+> A leaf is a **tile-cut artifact** iff (a) it is **degenerate — `pit_elev == out_elev`** (zero height)
+> **and** (b) its pit has a **cross-tile D8 neighbour at or below its elevation**
+> (`dem(cross_neighbour) ≤ dem(pit)`) — the escape route the in-grid pit test skips
+> (`dephier.hpp:378` continues on out-of-grid cells). A monotonic slope crossing the tile line makes
+> such a spurious pit (a *lower* neighbour across); a flat straddling the line makes one too (an *equal*
+> neighbour across). Contract these; keep every real depression, even one whose saddle lies on the
+> boundary.
 
-**Defining "strictly-lower neighbour across that edge."** A boundary pit cell lies *on* the tile edge,
-so 3 (edge) or 5 (corner) of its 8 D8 neighbours fall in the adjacent tile — the very neighbours the
-local pit test skips (`dephier.hpp:378` continues on out-of-grid cells). `cross_neighbour` is one of
-those immediately-adjacent cells just across the boundary. Use **strict `<`**
-(`dem(cross_neighbour) < dem(pit)`), matching the serial pit definition exactly (`dephier.hpp:380`):
-a cell that is a true local minimum stays a pit under any tiling; an artifact pit is one the tile edge
-manufactured by hiding a lower neighbour. Strict `<` has **no false positives** — a strictly-lower
-cross neighbour means water really would flow across, so the pit is genuinely spurious.
+**Why both conditions — neither alone is safe.** A boundary pit cell lies *on* the tile edge, so 3
+(edge) or 5 (corner) of its 8 D8 neighbours fall in the adjacent tile; `cross_neighbour` is one of those
+cells just across the line. Condition (b) is the original "strictly-lower neighbour across," **relaxed
+from `<` to `≤`** so it also catches the **equal-elevation flat** straddling the boundary — the residual
+a strict test would leave as a spurious extra node. Relaxing to `≤` *alone* would be wrong — it would
+over-collapse two genuinely distinct equal-level bowls that merely touch at the tile line — which is
+exactly why (a) is required: those touching bowls are *real* depressions that fill to a rim strictly
+above their pit (`pit_elev < out_elev`), so the degeneracy test rejects them. Conversely (a) alone is
+not enough either: a serial flood **can** legitimately produce a zero-height leaf — a one-cell flat with
+an equal-elevation exit to a neighbouring basin (observed on `--beta 2.1 --seed 9`, `pit(13,136)=
+376.665`, exiting sideways within its own tile) — which must be kept. That legitimate node has no
+cross-tile neighbour `≤` its pit, so (b) rejects it. The conjunction **(a) ∧ (b)** has **no false
+positives**, and by using `≤` it folds the boundary-spanning flat with the same test that handles the
+monotonic crossing.
 
-**Deferred residual — flats spanning the boundary.** The strict test does *not* resolve the
-**equal-elevation** crossing: a flat-bottomed bowl straddling the line has boundary pits whose cross
-neighbours are *equal*, not lower, so neither half is flagged and the single flat stays as two nodes.
-This is harmless — volumes still conserve; it is only a spurious extra node in the analysis tree — and
-disambiguating it (one flat cut in two vs. two equal-level flats meeting) needs flat-region–aware
-analysis, exactly the vast-flats pathology §8 flags. **Ship strict `<` first; treat boundary-spanning
-flats as a known, deferred residual** to fold in when flats are handled generally. (`<=` is *not* the
-fix — it would over-collapse two genuinely distinct equal-level depressions that merely touch.)
+**Algorithm (O(#depressions) + O(boundary); handles multi-way splits — corners, long boundaries cut by
+several tiles):**
+1. Flag each artifact leaf by (a) ∧ (b) above. Grid-locality — the pit's cell and the tile of a column —
+   uses only the DEM and the 1-cell perimeter strips a distributed build already exchanges.
+2. Splice each artifact out of the **ocean-linked chain** it sits in. The artifact is ocean-linked into
+   the live container `P` it overflows into; reattach the artifact's own ocean-linked children to `P`
+   and drop the artifact. A flat cut by several seams stacks several artifacts in one chain — each
+   resolves *up the parent chain* to the first live container, so corners and long boundaries collapse
+   correctly. The artifact holds no volume (`out_elev == pit_elev`) and its lone high cell lies above
+   `P`'s outlet, so `P`'s `cell_count`/`dep_vol` already equal serial's — nothing to re-total.
+3. Compact: renumber the survivors densely and remap every label-valued field (`parent`, `odep`,
+   `geolink`, `lchild`, `rchild`, `ocean_linked[]`), redirecting any reference to a contracted node to
+   its live container. O(#depressions).
 
-**Algorithm (handles multi-way splits — corners, long boundaries cut by several tiles):**
-1. Flag artifact leaves by the pit test above.
-2. Form connected components of artifact leaves linked through cross-tile *monotonic-crossing*
-   outlets (a corner bowl → 3–4 pieces; a long bowl → a chain).
-3. Contract each component and its internal meta-nodes to one leaf `L`:
-   `L.pit_cell/pit_elev = argmin/min` over pieces; `L.out_cell/out_elev =` the component's top meta
-   outlet (the real rim); `cell_count/total_elevation/dep_vol` are already the whole-bowl totals from
-   `CalculateTotalVolumes`, so they carry over unchanged.
-4. Rewire references from *outside* the component that pointed at a contracted piece
-   (`parent`, `odep`, `geolink`, `ocean_linked[]`) to `L`. O(#depressions) remap.
+*(An artifact attached as a binary child of a meta, rather than by an ocean-link, would instead need the
+meta dissolved and the sibling rewired; the pass detects and reports that form but does not contract it.
+It did not arise in any validated case — see below.)*
 
-**Status — BUILT & VALIDATED (2026-07-26).** Implemented as `CollapseSeamArtifacts(G, full, bounds)` in
-`tools/dephier_stitch.cpp`, run after `PhaseCD`. The concrete trigger was a **seam-straddling flat**: a
-tie region the seam bisects whose exit is on the far side (the fractal `--size 200 --beta 1.7 --seed 4`
-DEM at split 142, tie `{(141,182),(142,183)}=633.752` draining out via `(142,183)→(143,183)`). One tile
-sees its half as a pit → a spurious zero-height leaf ocean-linked into its real container. The pass
-contracts each such artifact and the tree becomes serial-identical.
-
-**The implemented criterion differs from the sketch above and is worth folding back into it (Wickert to
-reframe §3.2's design prose):** the artifact turned out to be a **degenerate leaf, `pit_elev==out_elev`**,
-attached by an **ocean_link** — *not* the "spurious leaf + cross-seam merge meta" the sketch predicted
-(the meta count is unchanged). The discriminator that survived validation is:
-
-> a leaf is a seam artifact iff (a) `pit_elev==out_elev` (zero height) **and** (b) its pit has a
-> cross-tile D8 neighbour `≤` its elevation. (b) is exactly this section's "pit on a tile edge with a
-> strictly-lower neighbour across", **relaxed to `≤`** — which *also folds the equal-elevation flat*,
-> closing the "Deferred residual — flats" above with the same test. (a) is load-bearing on its own:
-> a serial flood *can* legitimately make a zero-height leaf (a 1-cell flat with an equal-elevation exit
-> to a neighbour basin — found on `--beta 2.1 --seed 9`, `pit(13,136)=376.665`), so degeneracy alone
-> over-collapses; the seam-locality guard (b) is what excludes the legitimate case. A real depression's
-> pit is a strict local minimum, so it never satisfies (b) — no false positives.
-
-**Validated:** 1446/1447 tiled-vs-serial cases MATCH (benign fixtures + multi-seam sweeps + exhaustive
-single-seam over fractal terrains, β 1.3–2.5, seeds 1–15). The one DIFFER is a *separate* pre-existing
-residual — a seam-edge flat *cell reassignment* (same node counts; one boundary cell joins a different
-existing basin in the tiled flood), which is the flood-determinism-across-seam problem, not an artifact
-node (the collapse correctly no-ops on it). Rare artifacts (≈2 per ~1600 runs), matching the 1/195 est.
+**Status — BUILT & VALIDATED (2026-07-26).** `CollapseSeamArtifacts(G, full, bounds)` in
+`tools/dephier_stitch.cpp`, run after `PhaseCD`. The concrete trigger was a **seam-straddling flat**:
+the fractal `--size 200 --beta 1.7 --seed 4` DEM at split 142, tie `{(141,182),(142,183)}=633.752`
+draining out via `(142,183)→(143,183)` — one tile sees its half as a zero-height pit, ocean-linked into
+its real container. **1446/1447** tiled-vs-serial cases MATCH (benign fixtures + multi-seam sweeps +
+exhaustive single-seam over fractal terrains, β 1.3–2.5, seeds 1–15; ≈2 artifacts per ~1600 runs,
+matching the 1/195 estimate; **zero over-collapses, zero binary-child forms**). The lone DIFFER is a
+*separate*, pre-existing residual — a seam-edge flat **cell reassignment** (same node counts; one
+boundary cell joins a different existing basin in the tiled flood), a flood-determinism-across-seam
+effect, not an artifact node (the collapse correctly no-ops on it).
 
 **Caveat (footnote, not a blocker):** per-cell `flowdirs` near a cut differ from serial (tile-s cells
 point to the boundary pit, not across the line). This is irrelevant to pooled-water / FSM behaviour,
@@ -406,7 +397,10 @@ way — a "does not fit" result is the finding that redirects the architecture.
   pathology** — vast flats spanning many tiles (flats become many pit cells, `dephier.hpp:356–361`,
   inflating boundary outlets) is a real-DEM artifact (quantization, flattened lakes, no-data) that a
   continuous spectral field essentially never produces. Flats must be measured on real tiles (or a
-  purpose-built flat fixture), and this ties directly to §3.2's deferred equal-elevation residual.
+  purpose-built flat fixture). §3.2's collapse now folds the equal-elevation flat *straddling a seam*;
+  the residual this stresses is the *other* seam-flat effect — a boundary flat cell reassigned to a
+  different basin by the tiled flood (the one remaining validation DIFFER), which needs seam-aware
+  flat handling in the flood itself.
 
 ---
 
