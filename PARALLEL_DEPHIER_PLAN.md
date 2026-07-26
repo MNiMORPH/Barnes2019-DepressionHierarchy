@@ -319,16 +319,39 @@ Each step is a runnable check before the next layer of infrastructure — a 10-l
 
 ## 8. Precursor measurement (do this first — the whole memory argument rests on it)
 
-Before writing distributed code, **bound the reconciliation footprint on real global DEM tiles**
-(design note §4, §6 both call this the load-bearing assumption):
-- On MERIT/GEBCO-class 30″ tiles, run the *serial* build per tile and count: #depressions per tile,
-  #internal outlets, and (by exchanging strips offline) #cross-tile outlets. Extrapolate the global
-  #depressions and boundary-outlet totals.
-- **Decision gate:** if global (#depressions + #outlets) × record size fits comfortably on one node,
-  centralized Phase C (v1) stands. If not, escalate to the distributed join. Report the number
-  either way — a "does not fit" result is the finding that redirects the architecture.
-- Stress the pathological case the note names: vast flats spanning many tiles (flats become many pit
-  cells, `dephier.hpp:356–361`), which could inflate boundary outlets.
+Before writing distributed code, **bound the reconciliation footprint** — the load-bearing assumption
+(design note §4, §6). The measurement, on each tiling, runs the *serial* build per tile and counts:
+#depressions per tile, #internal outlets, and (by exchanging strips offline) #cross-tile outlets, then
+extrapolates global #depressions and boundary-outlet totals.
+
+**Decision gate:** if global (#depressions + #outlets) × record size fits comfortably on one node,
+centralized Phase C (v1) stands; if not, escalate to the distributed join. Report the number either
+way — a "does not fit" result is the finding that redirects the architecture.
+
+**Use both synthetic and real terrain — they answer different questions and are not interchangeable:**
+
+- **Synthetic (primary — this is a *scaling law*).** Reuse `WTM/tests/spectral_terrain.py`
+  (cross-repo dependency; the module already emits the ocean-ring mask DH needs for OCEAN seeding).
+  `fractal_terrain` (a 1/|k|^β spectral-synthesis field) gives the controlled sweep a fixed real tile
+  can't: vary N and roughness and watch how the footprint grows. **`β` is the knob — lower β = rougher
+  = more, smaller depressions = the adversarial regime that *maximizes* the count.** This is what
+  brackets Earth and probes the pathological case, and the same generator doubles as the fixture source
+  for the §6/§7 differential oracle (far richer than the tiny `test_cases/*.dem`). Do it once, use it
+  twice.
+  - **Caveat — the generator's default posture is tuned for the *opposite* goal.** Its docstring
+    band-limits (`kmax`, smooth gradients) to make FSM *water-routing* cross-rank reproducible. §8 only
+    *counts* depressions/outlets — it routes no water — so aggressive band-limiting suppresses small
+    depressions and **understates** the count, yielding a comfortably-small number that "confirms" the
+    memory bound as an artifact of the smoothing. For §8 do the opposite: **low β, high/no `kmax`
+    (rough)**, to stress #depressions. (Be skeptical of the pleasing number.)
+- **Real 30″ tiles (external validity — *not* the scaling tool).** A power-law field is not Earth. Two
+  things only real MERIT/GEBCO tiles answer: (1) **where Earth actually sits on the β-axis** — the
+  final "does the *real target* fit?" gate closes only on real data; pick contrasting terrain
+  (high-relief Andes, lake-dense Canadian Shield, flats-dominated Sahara/Caspian). (2) **The flats
+  pathology** — vast flats spanning many tiles (flats become many pit cells, `dephier.hpp:356–361`,
+  inflating boundary outlets) is a real-DEM artifact (quantization, flattened lakes, no-data) that a
+  continuous spectral field essentially never produces. Flats must be measured on real tiles (or a
+  purpose-built flat fixture), and this ties directly to §3.2's deferred equal-elevation residual.
 
 ---
 
