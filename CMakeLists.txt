@@ -22,8 +22,13 @@ if(USE_GDAL AND GDAL_FOUND)
   target_link_libraries(dephier_paper_tests.exe PRIVATE dephier richdem)
   target_compile_features(dephier_paper_tests.exe PUBLIC cxx_auto_type cxx_std_17)
 
+  # Tooling for the distributed-build effort (see PARALLEL_DEPHIER_PLAN.md).
+  add_executable(dephier_stats.exe tools/dephier_stats.cpp)
+  target_link_libraries(dephier_stats.exe PRIVATE dephier richdem)
+
   install(TARGETS dephier.exe DESTINATION bin)
   install(TARGETS dephier_paper_tests.exe DESTINATION bin)
+  install(TARGETS dephier_stats.exe DESTINATION bin)
 else()
   message(WARNING "GDAL is required to build the DepHier example programs; it is not needed to use the DepHier library in another project.")
 endif()
