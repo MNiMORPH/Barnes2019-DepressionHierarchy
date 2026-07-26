@@ -224,14 +224,32 @@ fix — it would over-collapse two genuinely distinct equal-level depressions th
 4. Rewire references from *outside* the component that pointed at a contracted piece
    (`parent`, `odep`, `geolink`, `ocean_linked[]`) to `L`. O(#depressions) remap.
 
-**Status / concrete trigger (2026-07-26).** The in-process stitch is now bit-identical to serial on
-tie-free terrain and on within-tile flats (flood-order determinism + flowdir conduit resolution). The
-first case that *requires* this collapse pass is a **seam-straddling flat**: a tie region the seam
-bisects whose exit is on the far side (e.g. the fractal `--size 200 --beta 1.7 --seed 4` DEM at split
-142, tie `{(141,182),(142,183)}=633.752` draining out via `(142,183)→(143,183)`). One tile sees its
-half as a pit → a spurious leaf + the cross-seam merge meta that `HandleEdge`/`PhaseCD` already built —
-i.e. exactly a boundary-split artifact in the form this pass consumes. **Decision: close it with this
-collapse pass (rides on existing machinery), not a flat-specific patch.** Rare (1/195 splits) but real.
+**Status — BUILT & VALIDATED (2026-07-26).** Implemented as `CollapseSeamArtifacts(G, full, bounds)` in
+`tools/dephier_stitch.cpp`, run after `PhaseCD`. The concrete trigger was a **seam-straddling flat**: a
+tie region the seam bisects whose exit is on the far side (the fractal `--size 200 --beta 1.7 --seed 4`
+DEM at split 142, tie `{(141,182),(142,183)}=633.752` draining out via `(142,183)→(143,183)`). One tile
+sees its half as a pit → a spurious zero-height leaf ocean-linked into its real container. The pass
+contracts each such artifact and the tree becomes serial-identical.
+
+**The implemented criterion differs from the sketch above and is worth folding back into it (Wickert to
+reframe §3.2's design prose):** the artifact turned out to be a **degenerate leaf, `pit_elev==out_elev`**,
+attached by an **ocean_link** — *not* the "spurious leaf + cross-seam merge meta" the sketch predicted
+(the meta count is unchanged). The discriminator that survived validation is:
+
+> a leaf is a seam artifact iff (a) `pit_elev==out_elev` (zero height) **and** (b) its pit has a
+> cross-tile D8 neighbour `≤` its elevation. (b) is exactly this section's "pit on a tile edge with a
+> strictly-lower neighbour across", **relaxed to `≤`** — which *also folds the equal-elevation flat*,
+> closing the "Deferred residual — flats" above with the same test. (a) is load-bearing on its own:
+> a serial flood *can* legitimately make a zero-height leaf (a 1-cell flat with an equal-elevation exit
+> to a neighbour basin — found on `--beta 2.1 --seed 9`, `pit(13,136)=376.665`), so degeneracy alone
+> over-collapses; the seam-locality guard (b) is what excludes the legitimate case. A real depression's
+> pit is a strict local minimum, so it never satisfies (b) — no false positives.
+
+**Validated:** 1446/1447 tiled-vs-serial cases MATCH (benign fixtures + multi-seam sweeps + exhaustive
+single-seam over fractal terrains, β 1.3–2.5, seeds 1–15). The one DIFFER is a *separate* pre-existing
+residual — a seam-edge flat *cell reassignment* (same node counts; one boundary cell joins a different
+existing basin in the tiled flood), which is the flood-determinism-across-seam problem, not an artifact
+node (the collapse correctly no-ops on it). Rare artifacts (≈2 per ~1600 runs), matching the 1/195 est.
 
 **Caveat (footnote, not a blocker):** per-cell `flowdirs` near a cut differ from serial (tile-s cells
 point to the boundary pit, not across the line). This is irrelevant to pooled-water / FSM behaviour,
