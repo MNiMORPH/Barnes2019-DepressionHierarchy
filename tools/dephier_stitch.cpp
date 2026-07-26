@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -204,17 +205,27 @@ int main(int argc, char **argv){
 
   const auto tile_of = [&](int x){ int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; };
   const auto is_ocean = [&](int x,int y){ return full.isNoData(x,y) || full(x,y)==ocean_level; };
-  // Lowest LAND neighbour on the full grid, and whether the cell touches ocean.
-  // An ocean neighbour is the sea (effectively -inf), so a cell touching ocean
-  // drains to the ocean regardless of its land neighbours.
+  // Lowest strictly-downhill LAND neighbour on the full grid, and whether the cell
+  // touches ocean. An ocean neighbour is the sea (effectively -inf), so a cell
+  // touching ocean drains to the ocean regardless of its land neighbours.
+  //
+  // Ties (equal-lowest neighbours) are broken by HIGHEST cell index, matching the
+  // flood's radix pop order (radix_heap sorts each equal-elevation bucket ascending
+  // and pops from the back, so the higher-index cell pops first and claims the shared
+  // upslope neighbour). This matters at a seam: a divide cell with a tied descent —
+  // one neighbour in each tile — is claimed by the serial flood from its highest-index
+  // neighbour, so drain() must pick the same side or the cross-seam case is mislabelled.
   const auto drain = [&](int x,int y,int &lx,int &ly,bool &to_ocean)->bool{
-    float best = full(x,y); bool found=false; to_ocean=false;
-    for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+    const float focal = full(x,y);
+    float best = std::numeric_limits<float>::infinity(); bool found=false; to_ocean=false;
+    for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){        // index-ascending order
       if(!dx && !dy) continue;
       int nx=x+dx, ny=y+dy;
       if(!full.inGrid(nx,ny)) continue;
       if(is_ocean(nx,ny)){ to_ocean=true; continue; }
-      if(full(nx,ny) < best){ best=full(nx,ny); lx=nx; ly=ny; found=true; }
+      const float e = full(nx,ny);
+      if(e >= focal) continue;                                  // only strictly downhill
+      if(e <= best){ best=e; lx=nx; ly=ny; found=true; }        // <= : later (higher-index) tie wins
     }
     return found;
   };
