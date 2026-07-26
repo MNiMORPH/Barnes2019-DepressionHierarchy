@@ -120,6 +120,26 @@ candidate outlet elevation `= max(elev(a), elev(b))`; for each depression pair
 records in exactly the `Outlet<elev_t>` form Phase C already consumes. **Merge** these into the
 gathered internal-outlet set, then run Phase C once, globally.
 
+**Verified against Barnes' own 2016 implementation** (`submodules/richdem/programs/parallel_priority_flood/main.cpp`).
+This is not reconstructed from the paper — it is his reference code, and the cross-tile rule above is
+line-for-line what he does:
+- **Perimeter strips, not a halo.** Each tile exports its 1-cell perimeter of `(elevation, label)` —
+  `dem.topRow()/bottomRow()/leftColumn()/rightColumn()` + `labels.*` (main.cpp:280–288). Non-
+  overlapping tiles; no ghost cells. This *is* our "boundary strip," and it settles the open
+  halo-vs-strip question: **Barnes uses the strip.** A halo is therefore an escalation we adopt only
+  if the oracle proves we need it (see §6, on-edge fixtures), not a default.
+- **`HandleEdge` = our reduction.** For each perimeter position `i` it pairs with cross-seam
+  neighbours `ni ∈ {i−1,i,i+1}` (D8), takes `elev_over = max(elev_a[i], elev_b[ni])`, and keeps the
+  **minimum** per label-pair in `mastergraph[c_l][n_l]` (main.cpp:344–398) — identical to our
+  min-of-max-per-depression-pair. His `mastergraph` is the boundary graph.
+- **Global namespace by offset.** Labels are shifted by a per-tile `label_offset` (main.cpp:92,
+  362–368) — exactly the §4 prefix-sum remap; special labels (≤1) are not offset.
+
+**Reuse, don't reinvent.** Build the stitch on his tiling infrastructure —
+`richdem/tiled/A2Array2D.hpp`, `common/Layoutfile.hpp`, and the `HandleEdge`/`HandleCorner` +
+`label_offset` machinery — rather than fresh code. The DH-new part is only carrying the merge tree
+(depression labels + outlets) through this join, not the join itself.
+
 ### 3.1 The identity question — and why the criterion must be semantic, not structural
 
 The design note (§4) states the distributed tree should be "identical to the serial one." Reading the
@@ -291,6 +311,14 @@ So a first-class deliverable is the **differential tester**:
    collapse criterion neither over-collapses (real saddle-on-boundary) nor under-collapses.
 5. Add a degenerate-tiling identity check: a **1×1 tiling must reproduce the serial tree bit-for-bit**
    with no collapse needed — this isolates namespace/remap bugs from genuine stitching effects.
+6. **On-edge (seam-hugging) depression fixtures — the halo decision.** Barnes' perimeter-strip join
+   uses no halo (§3), so the one case it may miss is a basin whose low cells straddle a tile seam:
+   both halves drain to the seam → both become `BOUNDARY` → the basin appears in *neither* tile's
+   depression list (§ "Q2 hard edges"). Include DEMs with a depression pit placed **exactly on the
+   seam** (via `tools/make_edge_depression_dem.py`) alongside an interior-pit control. If the stitch
+   reproduces the serial depression there, the strip suffices; if the oracle shows a *missing*
+   depression, that is the signal to add a 1-cell halo atop Barnes' approach. This fixture exists to
+   force that verdict rather than leave it to chance.
 
 Wire it into CTest: the in-process variant runs everywhere with no MPI at all; the MPI variant runs
 the same comparison over a few `localhost` ranks where MPI is available.
@@ -384,8 +412,17 @@ way — a "does not fit" result is the finding that redirects the architecture.
    thing collapse does *not* restore)?
 2. **Centralized vs. distributed Phase C (§2).** Given decadal rebuild cadence, is a serial
    reconciliation acceptable for v1, deferring the fully-distributed 2016 join until §8 says we must?
-3. **Reuse of the 2016 join code.** Is there existing Barnes-2016 join/tile-exchange code (in richdem
-   or elsewhere) we should build `TiledArray2D` and the strip exchange on, rather than writing fresh?
-4. **Global cell-index convention (§4).** `(tile,local)` pair vs. global `uint32` flat index — any
+3. **Reuse of the 2016 join code — found (§3).** Your parallel-priority-flood reference code is in
+   `submodules/richdem/programs/parallel_priority_flood/main.cpp`, and we intend to build the stitch
+   on its `A2Array2D`/`Layoutfile` tiling + `HandleEdge`/`label_offset` join rather than writing
+   fresh. Is `A2Array2D` the right base to carry an extra per-cell depression-label channel through,
+   or is there a newer/preferred tiling layer we should target?
+4. **Seam-straddling basins & the halo (§ Q2-hard-edges, §6.6).** Your perimeter-strip join carries no
+   halo, which for depression *filling* is sufficient. For the *hierarchy*, a basin whose low cells
+   straddle a seam can be missed by both tiles (both drain to the seam → `BOUNDARY`). We plan to let
+   the differential oracle's on-edge fixtures decide whether the strip suffices or a 1-cell halo is
+   warranted. Do you already know from the filling work whether this case bites in practice, or how
+   you'd prefer to handle it for DH?
+5. **Global cell-index convention (§4).** `(tile,local)` pair vs. global `uint32` flat index — any
    downstream (FSM) constraint that forces one?
 ```
