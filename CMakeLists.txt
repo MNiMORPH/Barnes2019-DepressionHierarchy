@@ -29,6 +29,9 @@ if(USE_GDAL AND GDAL_FOUND)
   add_executable(dephier_selfcheck.exe tools/dephier_selfcheck.cpp)
   target_link_libraries(dephier_selfcheck.exe PRIVATE dephier richdem)
 
+  add_executable(dephier_stitch.exe tools/dephier_stitch.cpp)
+  target_link_libraries(dephier_stitch.exe PRIVATE dephier richdem)
+
   install(TARGETS dephier.exe DESTINATION bin)
   install(TARGETS dephier_paper_tests.exe DESTINATION bin)
   install(TARGETS dephier_stats.exe DESTINATION bin)
