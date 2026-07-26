@@ -1,24 +1,27 @@
 // dephier_stitch -- in-process tiled DepressionHierarchy build, diffed against serial.
 //
-// The first realization of the stitch (PARALLEL_DEPHIER_PLAN.md §7.1) on the benign
-// case: a domain with an ocean ring, split into 1xN column tiles, so every tile
-// touches ocean and no BOUNDARY seeding is needed yet (that arrives with interior
-// tiles). It reuses the exact serial PhaseAB / PhaseCD (no dephier.hpp changes):
+// Stitch with BOUNDARY seeding (PARALLEL_DEPHIER_PLAN.md §3, §7.1):
 //
-//   per tile:  extract sub-DEM -> label ocean -> PhaseAB  => {depressions, outlets}
-//   global:    remap tiles into one namespace (shared ocean=0, offset the rest)
-//              match perimeter strips at each seam (Barnes' HandleEdge rule) -> cross outlets
-//              assemble global {depressions, outlets, label grid}
-//              run ONE global PhaseCD => global tree
-//   verify:    canonical signature (dh_canonical) must equal the serial build's.
+//   per tile:  extract sub-DEM -> label ocean; pre-label seam-edge cells whose
+//              steepest descent CROSSES the seam as BOUNDARY (so they seed as
+//              provisional exterior and never become spurious pits) -> PhaseAB
+//   global:    remap tiles into one namespace (shared ocean, offset the rest);
+//              resolve every BOUNDARY cell to the real depression it drains into
+//              (steepest descent, lowest first); re-derive the global outlet set
+//              from the resolved labels; run one global PhaseCD.
+//   verify:    canonical signature must equal the serial build's.
 //
-// Because the benign fixtures are tie-free, the match is bit-identity.
+// This validates the tree logic + BOUNDARY conduit resolution. It re-derives
+// outlets on the assembled grid rather than by perimeter-strip matching; the
+// strip-matching join (Barnes' HandleEdge) is the memory-efficient replacement
+// for that step in the distributed build, and rides on the same resolved labels.
 
 #include "dh_canonical.hpp"
 
 #include <dephier/dephier.hpp>
 #include <richdem/common/Array2D.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <map>
@@ -31,8 +34,8 @@ namespace dh = richdem::dephier;
 using dh::dh_label_t;
 using dh::OCEAN;
 using dh::NO_DEP;
+using dh::BOUNDARY;
 
-// Columns [x0,x1) of `full` as a standalone tile, preserving the NoData value.
 static rd::Array2D<float> extract_cols(const rd::Array2D<float> &full, int x0, int x1){
   rd::Array2D<float> t(x1 - x0, full.height());
   t.setNoData(full.noData());
@@ -42,7 +45,6 @@ static rd::Array2D<float> extract_cols(const rd::Array2D<float> &full, int x0, i
   return t;
 }
 
-// Label ocean (NoData or == ocean_level) as OCEAN, everything else NO_DEP.
 static rd::Array2D<dh_label_t> ocean_labels(const rd::Array2D<float> &dem, float ocean_level){
   rd::Array2D<dh_label_t> label(dem.width(), dem.height(), NO_DEP);
   for(unsigned int i=0;i<dem.size();i++)
@@ -51,29 +53,30 @@ static rd::Array2D<dh_label_t> ocean_labels(const rd::Array2D<float> &dem, float
   return label;
 }
 
-// One tile's PhaseAB result plus its local->global label map.
 template<class elev_t>
 struct Tile {
-  rd::Array2D<elev_t>          dem;
-  rd::Array2D<dh_label_t>      label;    // leaf labels after PhaseAB (local namespace)
-  dh::DepressionHierarchy<elev_t> deps;  // [ocean, leaves...] (local)
+  rd::Array2D<elev_t>             dem;
+  rd::Array2D<dh_label_t>         label;
+  dh::DepressionHierarchy<elev_t> deps;
   std::vector<dh::Outlet<elev_t>> outlets;
-  int x0 = 0;                            // global column of this tile's left edge
-  dh_label_t offset = 0;                 // global(local k>0) = offset + (k-1)
-  dh_label_t g(dh_label_t local) const { return local==OCEAN ? OCEAN : offset + (local - 1); }
+  int        x0 = 0;
+  dh_label_t offset = 0;
+  dh_label_t g(dh_label_t local) const {
+    if(local==OCEAN || local==BOUNDARY) return local;   // sentinels are global as-is
+    return offset + (local - 1);
+  }
 };
 
 int main(int argc, char **argv){
   if(argc!=4){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)>\n";
-    std::cout<<"  e.g. "<<argv[0]<<" int_two.dem -9999 20     (two tiles: [0,20) and [20,W))\n";
     return -1;
   }
   const std::string in_name     = argv[1];
   const float       ocean_level = std::stod(argv[2]);
 
-  // Parse split columns into tile boundaries.
   rd::Array2D<float> full(in_name);
+
   std::vector<int> bounds = {0};
   {
     std::string s = argv[3];
@@ -88,84 +91,116 @@ int main(int argc, char **argv){
   bounds.push_back(full.width());
   const int ntiles = bounds.size() - 1;
 
-  // ---- per-tile PhaseAB ----
+  const auto tile_of = [&](int x){ int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; };
+  const auto lowest_nb = [&](int x,int y,int &lx,int &ly)->bool{
+    float best = full(x,y); bool found=false;
+    for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+      if(!dx && !dy) continue;
+      int nx=x+dx, ny=y+dy;
+      if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
+      if(full(nx,ny) < best){ best=full(nx,ny); lx=nx; ly=ny; found=true; }
+    }
+    return found;
+  };
+
+  // ---- per-tile: pre-label seam-crossing edges BOUNDARY, then PhaseAB ----
   std::vector<Tile<float>> tiles(ntiles);
-  dh_label_t next_offset = 1;  // global label 0 is the shared ocean
+  dh_label_t next_offset = 1;
   for(int t=0;t<ntiles;t++){
     auto &tile = tiles[t];
     tile.x0    = bounds[t];
     tile.dem   = extract_cols(full, bounds[t], bounds[t+1]);
     tile.label = ocean_labels(tile.dem, ocean_level);
+
+    // internal-seam edge columns of this tile
+    std::vector<int> seam_cols;
+    if(t>0)          seam_cols.push_back(bounds[t]);       // left edge
+    if(t<ntiles-1)   seam_cols.push_back(bounds[t+1]-1);   // right edge
+    for(int gc : seam_cols)
+      for(int y=0;y<full.height();y++){
+        const int lc = gc - tile.x0;
+        if(tile.label(lc,y)!=NO_DEP) continue;             // ocean stays ocean
+        int lx,ly;
+        if(lowest_nb(gc,y,lx,ly) && tile_of(lx)!=t)        // steepest descent crosses the seam
+          tile.label(lc,y) = BOUNDARY;
+      }
+
     rd::Array2D<int8_t> fd(tile.dem.width(), tile.dem.height(), rd::NO_FLOW);
     dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(tile.dem, tile.label, fd, tile.deps, tile.outlets);
     tile.offset = next_offset;
-    next_offset += tile.deps.size() - 1;   // number of non-ocean depressions in this tile
+    next_offset += tile.deps.size() - 1;
   }
-  const dh_label_t n_global = next_offset;  // total global depression count
+  const dh_label_t n_global = next_offset;
 
-  // ---- assemble global depressions (shared ocean at 0, leaves remapped) ----
+  // ---- assemble global depressions + global label grid ----
   dh::DepressionHierarchy<float> G(n_global);
-  G[0] = tiles[0].deps[0];        // ocean prototype (PhaseAB leaves it empty of links)
+  G[0] = tiles[0].deps[0];
   G[0].dep_label = 0;
   for(auto &tile : tiles)
     for(dh_label_t k=1;k<tile.deps.size();k++){
       auto d = tile.deps[k];
       d.dep_label = tile.g(k);
-      if(d.pit_cell!=dh::NO_VALUE){          // globalise the tile-local pit index
+      if(d.pit_cell!=dh::NO_VALUE){
         int lx,ly; tile.dem.iToxy(d.pit_cell, lx, ly);
         d.pit_cell = full.xyToI(tile.x0 + lx, ly);
       }
       G[tile.g(k)] = d;
     }
-
-  // ---- assemble global outlets: intra-tile (remapped) ----
-  std::vector<dh::Outlet<float>> outlets;
-  for(auto &tile : tiles)
-    for(auto o : tile.outlets){
-      o.depa = tile.g(o.depa);
-      o.depb = tile.g(o.depb);
-      outlets.push_back(o);
-    }
-
-  // ---- cross-tile outlets: match adjacent perimeter strips (Barnes HandleEdge) ----
-  std::map<std::pair<dh_label_t,dh_label_t>, float> cross;
-  for(int t=0;t+1<ntiles;t++){
-    auto &A = tiles[t];      // left tile: its right column touches the seam
-    auto &B = tiles[t+1];    // right tile: its left column touches the seam
-    const auto ea = A.dem.rightColumn();
-    const auto eb = B.dem.leftColumn();
-    const auto la = A.label.rightColumn();
-    const auto lb = B.label.leftColumn();
-    const int H = ea.size();
-    for(int y=0;y<H;y++){
-      const dh_label_t ga = A.g(la[y]);
-      for(int ny=y-1;ny<=y+1;ny++){       // D8 across the seam
-        if(ny<0 || ny>=H) continue;
-        const dh_label_t gb = B.g(lb[ny]);
-        if(ga==gb) continue;              // same label (e.g. both ocean): no outlet
-        const float elev = std::max(ea[y], eb[ny]);
-        auto key = std::minmax(ga, gb);
-        auto it = cross.find({key.first, key.second});
-        if(it==cross.end() || elev < it->second)
-          cross[{key.first, key.second}] = elev;
-      }
-    }
-  }
-  for(auto &kv : cross){
-    dh::Outlet<float> o;
-    o.depa = kv.first.first;
-    o.depb = kv.first.second;
-    o.out_elev = kv.second;
-    o.out_cell = dh::NO_VALUE;
-    outlets.push_back(o);
-  }
-
-  // ---- global label grid for the volume pass ----
   rd::Array2D<dh_label_t> gLabel(full.width(), full.height(), OCEAN);
   for(auto &tile : tiles)
     for(int y=0;y<tile.dem.height();y++)
       for(int x=0;x<tile.dem.width();x++)
         gLabel(tile.x0 + x, y) = tile.g(tile.label(x, y));
+
+  // ---- conduit resolution: every BOUNDARY cell adopts the depression it drains
+  // into. Resolve lowest-first, so each cell's steepest-descent neighbour (which is
+  // strictly lower) is already a real label. ----
+  {
+    std::vector<std::pair<float,int>> bcells;   // (elev, flat index)
+    for(int y=0;y<full.height();y++)
+      for(int x=0;x<full.width();x++)
+        if(gLabel(x,y)==BOUNDARY)
+          bcells.emplace_back(full(x,y), full.xyToI(x,y));
+    std::sort(bcells.begin(), bcells.end());
+    for(auto &bc : bcells){
+      int x,y; full.iToxy(bc.second, x, y);
+      int lx,ly;
+      if(lowest_nb(x,y,lx,ly)) gLabel(x,y) = gLabel(lx,ly);
+      else                     gLabel(x,y) = OCEAN;        // isolated (shouldn't happen)
+    }
+  }
+
+  // ---- re-derive the global outlet set from the resolved labels (reproduces the
+  // serial PhaseB outlet rule: lowest max-of-pair between adjacent differing labels) ----
+  std::vector<dh::Outlet<float>> outlets;
+  {
+    std::map<std::pair<dh_label_t,dh_label_t>, std::pair<float,dh::flat_c_idx>> db;
+    for(int y=0;y<full.height();y++)
+      for(int x=0;x<full.width();x++){
+        const auto lc = gLabel(x,y);
+        if(full.isNoData(x,y)) continue;
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+          if(!dx && !dy) continue;
+          int nx=x+dx, ny=y+dy;
+          if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
+          const auto ln = gLabel(nx,ny);
+          if(ln==lc) continue;
+          dh::flat_c_idx ocell; float oelev;
+          if(full(x,y) >= full(nx,ny)){ oelev=full(x,y);  ocell=full.xyToI(x,y); }
+          else                        { oelev=full(nx,ny); ocell=full.xyToI(nx,ny); }
+          auto key = std::minmax(lc, ln);
+          auto it = db.find({key.first,key.second});
+          if(it==db.end() || oelev < it->second.first)
+            db[{key.first,key.second}] = {oelev, ocell};
+        }
+      }
+    for(auto &kv : db){
+      dh::Outlet<float> o;
+      o.depa = kv.first.first; o.depb = kv.first.second;
+      o.out_elev = kv.second.first; o.out_cell = kv.second.second;
+      outlets.push_back(o);
+    }
+  }
 
   // ---- one global PhaseCD ----
   dh::GetDepressionHierarchyPhaseCD<float>(G, outlets, full, gLabel);
@@ -181,52 +216,56 @@ int main(int argc, char **argv){
   const auto iv_stitch = dhtest::invariants(G);
   const auto iv_serial = dhtest::invariants(S);
 
-  std::cerr<<"tiles="<<ntiles
-           <<"  serial nodes="<<iv_serial.n_nodes<<" (leaf "<<iv_serial.n_leaf<<", meta "<<iv_serial.n_meta<<")"
+  std::cerr<<"serial nodes="<<iv_serial.n_nodes<<" (leaf "<<iv_serial.n_leaf<<", meta "<<iv_serial.n_meta<<")"
            <<"  stitch nodes="<<iv_stitch.n_nodes<<" (leaf "<<iv_stitch.n_leaf<<", meta "<<iv_stitch.n_meta<<")\n";
   std::cerr<<"serial total_dep_vol="<<iv_serial.total_dep_vol<<"  stitch total_dep_vol="<<iv_stitch.total_dep_vol<<"\n";
 
-  // Diagnostic: how many cells land in a different physical depression (identified
-  // by its global pit cell) between serial and stitch, and in which columns?
+  // Diagnostic: cells that resolve to a different LEAF depression (walk up while
+  // above the outlet; metas -> -2 since their pit cell is order-dependent).
   {
-    // Resolve a cell to the depression that actually CONTAINS it: walk up from the
-    // wavefront leaf label while the cell is above that depression's outlet (this is
-    // what CalculateMarginalVolumes does). Identify it by its global pit cell.
-    // -1 = resolves to ocean; -2 = resolves to a meta-depression (whose pit_cell is
-    // an order-dependent choice of one child, so not comparable); else the leaf's
-    // global pit cell. This isolates GENUINE leaf-membership differences.
-    const auto resolved_pit = [&](const dh::DepressionHierarchy<float> &deps,
-                                  const rd::Array2D<dh_label_t> &lab, int x, int y) -> int {
-      dh_label_t c = lab(x,y);
-      const float e = full(x,y);
+    const auto rleaf = [&](const dh::DepressionHierarchy<float> &deps,
+                           const rd::Array2D<dh_label_t> &lab, int x, int y)->int{
+      dh_label_t c = lab(x,y); const float e = full(x,y);
       while(c!=OCEAN && e > deps[c].out_elev) c = deps[c].parent;
       if(c==OCEAN) return -1;
-      if(deps[c].lchild!=dh::NO_VALUE) return -2;   // meta
+      if(deps[c].lchild!=dh::NO_VALUE) return -2;
       return (int)deps[c].pit_cell;
     };
-    std::map<int,int> diff_by_col;
-    int ndiff = 0, shown = 0;
-    for(int y=0;y<full.height();y++)
-      for(int x=0;x<full.width();x++){
-        const auto spit = resolved_pit(S, s_label, x, y);
-        const auto gpit = resolved_pit(G, gLabel, x, y);
-        if(spit!=gpit){
-          ndiff++; diff_by_col[x]++;
-          if(shown++ < 8)
-            std::cerr<<"  DIFF cell("<<x<<","<<y<<") elev="<<full(x,y)<<" s_pit="<<spit<<" g_pit="<<gpit<<"\n";
-        }
+    int ndiff=0, shown=0;
+    for(int y=0;y<full.height();y++) for(int x=0;x<full.width();x++){
+      if(full.isNoData(x,y)) continue;
+      if(rleaf(S,s_label,x,y)!=rleaf(G,gLabel,x,y)){
+        ndiff++;
+        if(shown++<6) std::cerr<<"  DIFF ("<<x<<","<<y<<") elev="<<full(x,y)
+                               <<" s="<<rleaf(S,s_label,x,y)<<" g="<<rleaf(G,gLabel,x,y)<<"\n";
       }
-    std::cerr<<"partition diff: "<<ndiff<<" leaf cells assigned to a different depression";
-    if(ndiff){ std::cerr<<" at columns"; for(auto &c:diff_by_col) std::cerr<<" "<<c.first<<"(x"<<c.second<<")"; }
-    std::cerr<<"\n";
+    }
+    std::cerr<<"leaf-assignment diff: "<<ndiff<<" cells\n";
+
+    // Is the residual node VALUES or tree TOPOLOGY? Compare the order-independent
+    // multiset of per-node (pit,out,cells,vol) descriptors.
+    const auto descriptors = [](const dh::DepressionHierarchy<float> &deps){
+      std::vector<std::string> v;
+      for(const auto &d : deps){
+        std::ostringstream os; os.setf(std::ios::fixed); os.precision(4);
+        os<<d.pit_elev<<","<<d.out_elev<<","<<d.cell_count<<","<<d.dep_vol;
+        v.push_back(os.str());
+      }
+      std::sort(v.begin(), v.end());
+      return v;
+    };
+    auto ds = descriptors(S), dg = descriptors(G);
+    int node_diffs = 0;
+    if(ds.size()==dg.size()) for(size_t i=0;i<ds.size();i++) if(ds[i]!=dg[i]) node_diffs++;
+    std::cerr<<"node-descriptor multiset diffs: "<<node_diffs<<" of "<<ds.size()
+             <<(node_diffs==0 ? "  (same nodes -> residual is TOPOLOGY)" : "  (residual is node VALUES)")<<"\n";
   }
 
   const bool ok = (sig_stitch==sig_serial);
   std::cout<<(ok ? "STITCH-MATCH " : "STITCH-DIFFER ")<<in_name<<" splits="<<argv[3]<<"\n";
   if(!ok){
-    std::cerr<<"  signatures differ (stitch "<<sig_stitch.size()<<" chars, serial "<<sig_serial.size()<<")\n";
-    std::cerr<<"  serial: "<<sig_serial<<"\n";
-    std::cerr<<"  stitch: "<<sig_stitch<<"\n";
+    std::cerr<<"  serial: "<<sig_serial.substr(0,400)<<"\n";
+    std::cerr<<"  stitch: "<<sig_stitch.substr(0,400)<<"\n";
   }
   return ok ? 0 : 1;
 }
