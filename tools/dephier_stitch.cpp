@@ -70,6 +70,114 @@ struct Tile {
   }
 };
 
+// §3.2 collapse pass -- contract seam-split artifacts into a serial-identical tree.
+//
+// A tiled flood can turn a cell (or flat) whose TRUE drainage exits across a seam
+// into a spurious degenerate depression: a zero-height leaf (pit_elev==out_elev)
+// whose pit sits on a tile edge with a cross-tile neighbour AT OR BELOW its elevation
+// -- the escape the tile could not see (a lower neighbour => a monotonic slope cut by
+// the seam; an equal neighbour => a flat straddling the seam, §3.2's deferred case).
+// Both conditions are load-bearing:
+//   * pit_elev==out_elev alone is NOT sufficient -- a serial flood CAN produce a
+//     legitimate zero-height depression (a flat with an equal-elevation exit to a
+//     neighbouring basin), which must be kept. (Observed: seed9 beta2.1.)
+//   * the cross-tile "<=pit" escape is the seam-locality that distinguishes the
+//     artifact (§3.2 "pit on a tile edge with a strictly-lower neighbour across",
+//     here relaxed to <= to also fold the equal-elevation flat).
+// A real depression's pit is a strict local minimum, so it never has a lower/equal
+// cross-tile neighbour -- the test has no false positives on genuine basins.
+//
+// The artifact is spliced out of the ocean_linked chain between its container P and
+// P's other ocean-linked children: its ocean_linked children reattach to P, it is
+// dropped, and labels are compacted. It holds no volume (out==pit) and its lone high
+// cell is above P's outlet, so P's cell_count/dep_vol already match serial.
+//
+// Grid-locality (pit cell, tile of a column) uses the DEM and tile bounds -- the
+// 1-cell perimeter strips a distributed build already exchanges. Returns the number
+// of artifacts contracted. O(#depressions) + O(boundary).
+static int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
+                                 const rd::Array2D<float> &full,
+                                 const std::vector<int> &bounds){
+  const dh_label_t N = G.size();
+  std::vector<char> dead(N, 0);
+  int contracted = 0, binary_skipped = 0;
+
+  const auto tile_of = [&](int x){ int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; };
+
+  // Pass A -- mark the seam-cut artifacts (see the criterion above).
+  for(dh_label_t i=1;i<N;i++){                        // skip ocean (node 0)
+    const auto &d = G[i];
+    if(d.lchild!=dh::NO_VALUE || d.rchild!=dh::NO_VALUE) continue;  // leaves only
+    if(d.pit_cell==dh::NO_VALUE) continue;                         // real pit, not a meta
+    if(d.pit_elev!=d.out_elev) continue;                          // zero-height (necessary)
+
+    // Seam-locality: does the pit have a cross-tile D8 neighbour at or below it?
+    int px,py; full.iToxy(d.pit_cell, px, py);
+    const float pe = d.pit_elev;
+    bool seam_cut = false;
+    for(int dy=-1;dy<=1 && !seam_cut;dy++) for(int dx=-1;dx<=1 && !seam_cut;dx++){
+      if(!dx && !dy) continue;
+      const int nx=px+dx, ny=py+dy;
+      if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
+      if(tile_of(nx)!=tile_of(px) && full(nx,ny)<=pe) seam_cut = true;
+    }
+    if(!seam_cut) continue;                            // legit degenerate leaf: keep
+
+    const auto &pol = G[d.parent].ocean_linked;
+    if(std::find(pol.begin(), pol.end(), i)==pol.end()){
+      std::cerr<<"collapse: seam artifact "<<i<<" is a binary child of "<<d.parent
+               <<" (not the ocean_linked splice case; not handled); skipped\n";
+      binary_skipped++;
+      continue;
+    }
+    dead[i] = 1;
+    contracted++;
+  }
+  (void)binary_skipped;
+  if(contracted==0) return 0;
+
+  // resolve(x) -- follow the parent chain up until a LIVE node. Artifacts are always
+  // ocean_linked to their parent, so the parent chain is the ocean_linked spine; a
+  // chain of stacked artifacts (a flat split by several seams) collapses to the first
+  // live container. The ocean (node 0, never dead) terminates every chain.
+  const auto resolve = [&](dh_label_t x)->dh_label_t {
+    for(unsigned g=0; dead[x] && g<=N; g++) x = G[x].parent;
+    return x;
+  };
+
+  // Compact: drop dead nodes, remap the survivors densely.
+  std::vector<dh_label_t> perm(N, dh::NO_VALUE);
+  dh_label_t next = 0;
+  for(dh_label_t i=0;i<N;i++) if(!dead[i]) perm[i] = next++;
+  const auto mv = [&](dh_label_t x)->dh_label_t {   // dead references redirect to the live container
+    return x==dh::NO_VALUE ? dh::NO_VALUE : perm[resolve(x)];
+  };
+
+  dh::DepressionHierarchy<float> H(next);
+  for(dh_label_t i=0;i<N;i++){
+    if(dead[i]) continue;
+    auto d = G[i];                                   // copy attributes
+    d.parent    = mv(d.parent);
+    d.odep      = mv(d.odep);
+    d.geolink   = mv(d.geolink);
+    d.lchild    = mv(d.lchild);                      // binary children are never artifacts
+    d.rchild    = mv(d.rchild);
+    d.dep_label = perm[i];
+    d.ocean_linked.clear();                          // rebuilt below from the contracted edges
+    H[perm[i]] = std::move(d);
+  }
+  // Rebuild the ocean_linked forest by contracting every original edge: a live child
+  // re-homes to the first live node above its (possibly dead) parent; edges into dead
+  // children vanish (that child's own children reconnect when its edges are processed).
+  for(dh_label_t P=0;P<N;P++)
+    for(const dh_label_t child : G[P].ocean_linked)
+      if(!dead[child])
+        H[perm[resolve(P)]].ocean_linked.push_back(perm[child]);
+
+  G = std::move(H);
+  return contracted;
+}
+
 int main(int argc, char **argv){
   if(argc!=4){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)>\n";
@@ -257,6 +365,10 @@ int main(int argc, char **argv){
 
   // ---- one global PhaseCD ----
   dh::GetDepressionHierarchyPhaseCD<float>(G, outlets, full, gLabel);
+
+  // ---- §3.2 collapse pass: contract seam-split artifacts to a serial-identical tree ----
+  const int n_collapsed = CollapseSeamArtifacts(G, full, bounds);
+  if(n_collapsed) std::cerr<<"collapse: contracted "<<n_collapsed<<" seam artifact(s)\n";
 
   // ---- serial ground truth ----
   auto s_label = ocean_labels(full, ocean_level);
