@@ -89,12 +89,19 @@ int main(int argc, char **argv){
       std::cerr<<"  SKIP  sensitivity: no leaf depression to mutate\n";
   }
 
+  //Deterministic 64-bit FNV-1a fingerprint of the canonical signature, so the
+  //serial output can be regression-checked across code changes (e.g. the
+  //Phase B/C refactor) independent of std::hash seeding.
+  uint64_t fp = 1469598103934665603ull;
+  for(const unsigned char ch: sig){ fp ^= ch; fp *= 1099511628211ull; }
+
   const auto inv = dhtest::invariants(deps);
   std::cerr<<"\n";
   std::cerr<<"nodes="<<inv.n_nodes<<"  leaves="<<inv.n_leaf<<"  meta="<<inv.n_meta
            <<"  total_cells="<<inv.total_cell_count
            <<"  total_dep_vol="<<inv.total_dep_vol<<"\n";
   std::cerr<<"signature length = "<<sig.size()<<" chars\n";
+  std::cout<<"SIGFP "<<in_name<<" "<<sig.size()<<" "<<std::hex<<fp<<std::dec<<"\n";
 
   std::cerr<<"\n"<<(failures==0 ? "ALL CHECKS PASSED" : "CHECKS FAILED")<<"\n";
   return failures==0 ? 0 : 1;
