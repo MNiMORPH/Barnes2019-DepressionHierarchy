@@ -98,4 +98,6 @@ users, and the build is a priority-flood plus a merge tree, so a distributed bui
 alone (compute a bonus), it is a research-grade effort, and it is naturally **Richard Barnes'
 territory as author of both this library and the parallel priority-flood** — so the intent is
 to co-scope and co-author, starting from a fork (MNiMORPH). Recommended precursor: bound the
-boundary-graph size on real global DEM tiles, since the whole memory argument rests on it.
+boundary-graph size on real global DEM tiles, since the whole memory argument rests on it —
+concrete input on hand is the **GEBCO 30″ global DEM** (`gebco_08.nc`, the full 933,120,000-cell
+grid): tile it and count the spill points / cross-tile depressions against `N`.
