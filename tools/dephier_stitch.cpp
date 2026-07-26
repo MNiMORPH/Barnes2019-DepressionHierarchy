@@ -296,6 +296,47 @@ int main(int argc, char **argv){
       if(pit_of(S,s_label,x,y,true )!=pit_of(G,gLabel,x,y,true )) leafdiff++;
     }
     std::cerr<<"  raw-label diffs="<<rawdiff<<"  leaf-assignment diffs="<<leafdiff<<"\n";
+
+    // For each cell whose resolved leaf differs, dump the depression chain in both
+    // builds (label-namespace-independent: identify a node by its pit cell's x,y).
+    const auto pxy = [&](const dh::DepressionHierarchy<float> &deps, dh_label_t c)->std::string{
+      if(c==dh::NO_VALUE) return "-";
+      if(c==OCEAN) return "OCEAN";
+      if(deps[c].pit_cell==dh::NO_VALUE) return "meta(no-pit)";
+      int px,py; full.iToxy(deps[c].pit_cell,px,py); std::ostringstream os;
+      os<<"pit("<<px<<","<<py<<")"; return os.str();
+    };
+    const auto dump_chain = [&](const char *tag, const dh::DepressionHierarchy<float> &deps,
+                                const rd::Array2D<dh_label_t> &lab, int x, int y){
+      std::cerr<<"    "<<tag<<" cell("<<x<<","<<y<<") elev="<<full(x,y)<<":\n";
+      dh_label_t c = lab(x,y);
+      for(int depth=0; c!=OCEAN && depth<12; depth++){
+        const auto &d = deps[c];
+        std::cerr<<"      "<<pxy(deps,c)<<" pit_elev="<<d.pit_elev<<" out_elev="<<d.out_elev
+                 <<" lchild="<<pxy(deps,d.lchild)<<" rchild="<<pxy(deps,d.rchild)
+                 <<" #ocean_linked="<<d.ocean_linked.size()<<"\n";
+        c = d.parent;
+      }
+    };
+    int shown=0;
+    for(int y=0;y<full.height() && shown<3;y++) for(int x=0;x<full.width() && shown<3;x++){
+      if(full.isNoData(x,y)) continue;
+      if(pit_of(S,s_label,x,y,true)!=pit_of(G,gLabel,x,y,true)){
+        std::cerr<<"  --- leaf-diff cell #"<<shown<<" ---\n";
+        dump_chain("SERIAL", S, s_label, x, y);
+        dump_chain("STITCH", G, gLabel, x, y);
+        // Full field set of the stitch node the cell lands in, and who references it.
+        const dh_label_t c = gLabel(x,y);
+        const auto &d = G[c];
+        std::cerr<<"    STITCH node "<<c<<" "<<pxy(G,c)<<": parent="<<pxy(G,d.parent)
+                 <<" odep="<<pxy(G,d.odep)<<" geolink="<<pxy(G,d.geolink)
+                 <<" ocean_parent="<<d.ocean_parent<<" cc="<<d.cell_count<<" dv="<<d.dep_vol<<" ol={";
+        for(auto o: d.ocean_linked) std::cerr<<pxy(G,o)<<" ";
+        std::cerr<<"}\n";
+        shown++;
+      }
+    }
+
     std::cerr<<"  serial: "<<sig_serial.substr(0,300)<<"\n";
     std::cerr<<"  stitch: "<<sig_stitch.substr(0,300)<<"\n";
   }
