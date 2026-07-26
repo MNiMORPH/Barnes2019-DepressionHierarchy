@@ -7,14 +7,17 @@
 //              provisional exterior and never become spurious pits) -> PhaseAB
 //   global:    remap tiles into one namespace (shared ocean, offset the rest);
 //              resolve every BOUNDARY cell to the real depression it drains into
-//              (steepest descent, lowest first); re-derive the global outlet set
-//              from the resolved labels; run one global PhaseCD.
+//              (steepest descent, lowest first); build the outlet set as per-tile
+//              intra-tile outlets + Barnes' HandleEdge across the seam perimeters;
+//              run one global PhaseCD.
 //   verify:    canonical signature must equal the serial build's.
 //
-// This validates the tree logic + BOUNDARY conduit resolution. It re-derives
-// outlets on the assembled grid rather than by perimeter-strip matching; the
-// strip-matching join (Barnes' HandleEdge) is the memory-efficient replacement
-// for that step in the distributed build, and rides on the same resolved labels.
+// The outlet step is in the distributable shape: each tile derives outlets from its
+// own resolved labels, and only the 1-cell perimeter strips cross the seam (Barnes'
+// HandleEdge). In this in-process harness that is organizationally equivalent to a
+// single global pass; in a distributed build it is what keeps the per-rank footprint
+// O(N/P) + O(boundary). BOUNDARY conduit resolution still uses the full grid here
+// (the distributed version needs a cross-tile boundary-graph pass -- future work).
 
 #include "dh_canonical.hpp"
 
@@ -177,30 +180,54 @@ int main(int argc, char **argv){
     }
   }
 
-  // ---- re-derive the global outlet set from the resolved labels (reproduces the
-  // serial PhaseB outlet rule: lowest max-of-pair between adjacent differing labels) ----
+  // ---- global outlet set, in the distributable shape (Barnes' join): each tile
+  // derives its own outlets from its resolved labels (intra-tile adjacencies), and
+  // only the perimeter strips cross the seam via HandleEdge. Both feed one database
+  // keyed on the depression pair, keeping the lowest max-of-pair -- the serial PhaseB
+  // rule. Intra-tile + cross-seam together cover every adjacency, so the result is
+  // identical to a single global pass. ----
   std::vector<dh::Outlet<float>> outlets;
   {
     std::map<std::pair<dh_label_t,dh_label_t>, std::pair<float,dh::flat_c_idx>> db;
+    const auto record = [&](dh_label_t la, dh_label_t lb,
+                            float ea, dh::flat_c_idx ca, float eb, dh::flat_c_idx cb){
+      if(la==lb) return;                          // same depression: not an outlet
+      float oelev; dh::flat_c_idx ocell;          // outlet = the higher of the pair
+      if(ea>=eb){ oelev=ea; ocell=ca; } else { oelev=eb; ocell=cb; }
+      const auto key = std::minmax(la, lb);
+      const auto it = db.find({key.first,key.second});
+      if(it==db.end() || oelev < it->second.first)
+        db[{key.first,key.second}] = {oelev, ocell};
+    };
+
+    // Per-tile: adjacencies whose neighbour lies in the SAME tile.
     for(int y=0;y<full.height();y++)
       for(int x=0;x<full.width();x++){
-        const auto lc = gLabel(x,y);
         if(full.isNoData(x,y)) continue;
         for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
           if(!dx && !dy) continue;
           int nx=x+dx, ny=y+dy;
           if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
-          const auto ln = gLabel(nx,ny);
-          if(ln==lc) continue;
-          dh::flat_c_idx ocell; float oelev;
-          if(full(x,y) >= full(nx,ny)){ oelev=full(x,y);  ocell=full.xyToI(x,y); }
-          else                        { oelev=full(nx,ny); ocell=full.xyToI(nx,ny); }
-          auto key = std::minmax(lc, ln);
-          auto it = db.find({key.first,key.second});
-          if(it==db.end() || oelev < it->second.first)
-            db[{key.first,key.second}] = {oelev, ocell};
+          if(tile_of(nx)!=tile_of(x)) continue;   // cross-seam: handled below
+          record(gLabel(x,y), gLabel(nx,ny), full(x,y), full.xyToI(x,y),
+                                             full(nx,ny), full.xyToI(nx,ny));
         }
       }
+
+    // HandleEdge: match the two resolved perimeter strips at each seam (D8), exactly
+    // as Barnes' parallel priority-flood pairs edge cell i with neighbours i-1,i,i+1.
+    for(size_t b=1;b+1<bounds.size();b++){
+      const int cA=bounds[b]-1, cB=bounds[b];     // the two columns straddling the seam
+      for(int y=0;y<full.height();y++){
+        if(full.isNoData(cA,y)) continue;
+        for(int ny=y-1;ny<=y+1;ny++){
+          if(ny<0 || ny>=full.height() || full.isNoData(cB,ny)) continue;
+          record(gLabel(cA,y), gLabel(cB,ny), full(cA,y), full.xyToI(cA,y),
+                                              full(cB,ny), full.xyToI(cB,ny));
+        }
+      }
+    }
+
     for(auto &kv : db){
       dh::Outlet<float> o;
       o.depa = kv.first.first; o.depb = kv.first.second;
