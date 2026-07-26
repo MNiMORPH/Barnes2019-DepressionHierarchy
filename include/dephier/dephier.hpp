@@ -636,9 +636,20 @@ void GetDepressionHierarchyPhaseCD(
   Timer timer_dephier;
   timer_dephier.start();
 
-  //Sort outlets in order from lowest to highest. Takes O(N log N) time.
-  std::sort(outlets.begin(), outlets.end(), [](const Outlet<elev_t> &a, const Outlet<elev_t> &b){
-    return a.out_elev<b.out_elev;
+  //Sort outlets in order from lowest to highest. Takes O(N log N) time. Ties are
+  //broken by purely geometric, label-namespace-independent keys -- the outlet cell,
+  //then the endpoint depressions' pit cells -- so the hierarchy is deterministic
+  //regardless of the order in which outlets were discovered (which differs between a
+  //serial and a distributed build). At a triple junction several outlets share the
+  //same out_elev and out_cell; the pit-cell key gives them a canonical order, which
+  //is what lets a distributed build reproduce the serial tree exactly.
+  std::sort(outlets.begin(), outlets.end(), [&depressions](const Outlet<elev_t> &a, const Outlet<elev_t> &b){
+    if(a.out_elev!=b.out_elev) return a.out_elev<b.out_elev;
+    if(a.out_cell!=b.out_cell) return a.out_cell<b.out_cell;
+    const auto ka = std::minmax(depressions[a.depa].pit_cell, depressions[a.depb].pit_cell);
+    const auto kb = std::minmax(depressions[b.depa].pit_cell, depressions[b.depb].pit_cell);
+    if(ka.first !=kb.first ) return ka.first <kb.first;
+    return ka.second<kb.second;
   });
 
   //TODO: For debugging
