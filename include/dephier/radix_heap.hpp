@@ -387,6 +387,16 @@ class pair_radix_heap {
     buckets_[i].clear();
     bucket_flags_.set_empty(i);
     buckets_min_[i] = std::numeric_limits<unsigned_key_type>::max();
+
+    //Bucket 0 now holds every item at the minimum key (equal elevation). Sort it by
+    //value so equal-elevation cells are popped in a deterministic, geometric order
+    //(pop_back -> descending value) rather than insertion (LIFO) order. This makes
+    //flat resolution reproducible and, because row-major cell index preserves order
+    //between global and tile-local indexing within a tile, lets a distributed build
+    //reproduce the serial build over flats.
+    std::sort(buckets_[0].begin(), buckets_[0].end(),
+              [](const std::pair<unsigned_key_type,value_type> &a,
+                 const std::pair<unsigned_key_type,value_type> &b){ return a.second < b.second; });
   }
 };
 }  // namespace radix_heap
