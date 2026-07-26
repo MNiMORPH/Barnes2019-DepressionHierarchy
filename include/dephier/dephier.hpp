@@ -260,17 +260,22 @@ std::ostream& operator<<(std::ostream &out, const DepressionHierarchy<elev_t> &d
 //        flowdirs - A value [0,7] indicated which direction water from the cell
 //                   flows in order to go "downhill". All cells have a flow
 //                   direction (even flats) except for pit cells.
+//Phase A+B of the build: seed the priority-flood, grow the leaf depressions,
+//and discover the lowest outlet between each pair of adjacent depressions.
+//Exposed separately (PARALLEL_DEPHIER_PLAN.md) so a distributed build can run it
+//per tile and reconcile outlets across tiles before the grid-free hierarchy
+//assembly. `depressions` and `outlets` are outputs and must be empty on entry;
+//`outlets` is left UNSORTED (the assembly phase sorts it).
 template<class elev_t, Topology topo>
-DepressionHierarchy<elev_t> GetDepressionHierarchy(
-  const Array2D<elev_t> &dem,
-  Array2D<dh_label_t>   &label,
-  Array2D<int8_t>       &flowdirs
+void GetDepressionHierarchyPhaseAB(
+  const Array2D<elev_t>       &dem,
+  Array2D<dh_label_t>         &label,
+  Array2D<int8_t>             &flowdirs,
+  DepressionHierarchy<elev_t> &depressions,
+  std::vector<Outlet<elev_t>> &outlets
 ){
   ProgressBar progress;
-  Timer timer_overall;
   Timer timer_dephier;
-  timer_overall.start();
-
   timer_dephier.start();
 
   RDLOG_ALG_NAME<<"DepressionHierarchy";
@@ -283,8 +288,7 @@ DepressionHierarchy<elev_t> GetDepressionHierarchy(
   constexpr auto neighbours = get_nmax_for_topology<topo>();
 
   //Depressions are identified by a number [0,*). The ocean is always
-  //"depression" 0. This vector holds the depressions.
-  DepressionHierarchy<elev_t> depressions;
+  //"depression" 0. `depressions` is an output parameter (empty on entry).
 
   //This keeps track of the outlets we find. Each pair of depressions can only
   //be linked once and the lowest link found between them is the one which is
@@ -588,7 +592,6 @@ DepressionHierarchy<elev_t> GetDepressionHierarchy(
   //we will move all of the outlets so we can sort them by elevation. Note that
   //this temporarily doubles the memory required by the program. TODO: Is there
   //a way to avoid this doubling?
-  std::vector<Outlet<elev_t>> outlets;
 
   //Pre-size the vector to avoid expensive copy operations as we expand it
   outlets.reserve(outlet_database.size());
@@ -600,6 +603,27 @@ DepressionHierarchy<elev_t> GetDepressionHierarchy(
   //It's a little difficult to free memory, but this should do it by replacing
   //the outlet database with an empty database.
   outlet_database = outletdb_t();
+
+  RDLOG_TIME_USE<<"t Time to find outlets = "<<timer_dephier.stop()<<" s";
+}
+
+
+
+//Phase C+D of the build: assemble the depression hierarchy from the outlets and
+//then compute volumes. Grid-free except for the volume pass. In a distributed
+//build this runs once, globally, on the union of all tiles' outlets plus the
+//cross-tile outlets. Consumes (sorts) `outlets` and completes `depressions` in
+//place; `depressions` and `outlets` are the outputs of GetDepressionHierarchyPhaseAB.
+template<class elev_t>
+void GetDepressionHierarchyPhaseCD(
+  DepressionHierarchy<elev_t> &depressions,
+  std::vector<Outlet<elev_t>> &outlets,
+  const Array2D<elev_t>       &dem,
+  const Array2D<dh_label_t>   &label
+){
+  ProgressBar progress;
+  Timer timer_dephier;
+  timer_dephier.start();
 
   //Sort outlets in order from lowest to highest. Takes O(N log N) time.
   std::sort(outlets.begin(), outlets.end(), [](const Outlet<elev_t> &a, const Outlet<elev_t> &b){
@@ -751,8 +775,23 @@ DepressionHierarchy<elev_t> GetDepressionHierarchy(
   CalculateTotalVolumes(depressions);
 
   RDLOG_TIME_USE<<"t Time to calculate volumes = "<<timer_volumes.stop()<<" s";
-  RDLOG_TIME_USE<<"t Total time in depression hierarchy calculations = "<<timer_overall.stop()<<" s";
+}
 
+
+
+//Serial convenience wrapper preserving the original public interface: run the
+//flood + outlet discovery (Phase A/B) then the hierarchy assembly + volumes
+//(Phase C/D). Behaviour is identical to the pre-split implementation.
+template<class elev_t, Topology topo>
+DepressionHierarchy<elev_t> GetDepressionHierarchy(
+  const Array2D<elev_t> &dem,
+  Array2D<dh_label_t>   &label,
+  Array2D<int8_t>       &flowdirs
+){
+  DepressionHierarchy<elev_t> depressions;
+  std::vector<Outlet<elev_t>> outlets;
+  GetDepressionHierarchyPhaseAB<elev_t,topo>(dem, label, flowdirs, depressions, outlets);
+  GetDepressionHierarchyPhaseCD<elev_t>(depressions, outlets, dem, label);
   return depressions;
 }
 
