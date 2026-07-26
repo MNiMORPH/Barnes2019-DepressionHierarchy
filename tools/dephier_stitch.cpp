@@ -92,12 +92,17 @@ int main(int argc, char **argv){
   const int ntiles = bounds.size() - 1;
 
   const auto tile_of = [&](int x){ int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; };
-  const auto lowest_nb = [&](int x,int y,int &lx,int &ly)->bool{
-    float best = full(x,y); bool found=false;
+  const auto is_ocean = [&](int x,int y){ return full.isNoData(x,y) || full(x,y)==ocean_level; };
+  // Lowest LAND neighbour on the full grid, and whether the cell touches ocean.
+  // An ocean neighbour is the sea (effectively -inf), so a cell touching ocean
+  // drains to the ocean regardless of its land neighbours.
+  const auto drain = [&](int x,int y,int &lx,int &ly,bool &to_ocean)->bool{
+    float best = full(x,y); bool found=false; to_ocean=false;
     for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
       if(!dx && !dy) continue;
       int nx=x+dx, ny=y+dy;
-      if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
+      if(!full.inGrid(nx,ny)) continue;
+      if(is_ocean(nx,ny)){ to_ocean=true; continue; }
       if(full(nx,ny) < best){ best=full(nx,ny); lx=nx; ly=ny; found=true; }
     }
     return found;
@@ -120,8 +125,9 @@ int main(int argc, char **argv){
       for(int y=0;y<full.height();y++){
         const int lc = gc - tile.x0;
         if(tile.label(lc,y)!=NO_DEP) continue;             // ocean stays ocean
-        int lx,ly;
-        if(lowest_nb(gc,y,lx,ly) && tile_of(lx)!=t)        // steepest descent crosses the seam
+        int lx,ly; bool to_ocean;
+        // BOUNDARY only if it drains across the seam and NOT to the ocean
+        if(drain(gc,y,lx,ly,to_ocean) && !to_ocean && tile_of(lx)!=t)
           tile.label(lc,y) = BOUNDARY;
       }
 
@@ -164,9 +170,10 @@ int main(int argc, char **argv){
     std::sort(bcells.begin(), bcells.end());
     for(auto &bc : bcells){
       int x,y; full.iToxy(bc.second, x, y);
-      int lx,ly;
-      if(lowest_nb(x,y,lx,ly)) gLabel(x,y) = gLabel(lx,ly);
-      else                     gLabel(x,y) = OCEAN;        // isolated (shouldn't happen)
+      int lx,ly; bool to_ocean;
+      const bool found = drain(x,y,lx,ly,to_ocean);
+      if(to_ocean || !found) gLabel(x,y) = OCEAN;          // drains to the sea
+      else                   gLabel(x,y) = gLabel(lx,ly);  // drains into a depression
     }
   }
 
@@ -220,52 +227,31 @@ int main(int argc, char **argv){
            <<"  stitch nodes="<<iv_stitch.n_nodes<<" (leaf "<<iv_stitch.n_leaf<<", meta "<<iv_stitch.n_meta<<")\n";
   std::cerr<<"serial total_dep_vol="<<iv_serial.total_dep_vol<<"  stitch total_dep_vol="<<iv_stitch.total_dep_vol<<"\n";
 
-  // Diagnostic: cells that resolve to a different LEAF depression (walk up while
-  // above the outlet; metas -> -2 since their pit cell is order-dependent).
-  {
-    const auto rleaf = [&](const dh::DepressionHierarchy<float> &deps,
-                           const rd::Array2D<dh_label_t> &lab, int x, int y)->int{
-      dh_label_t c = lab(x,y); const float e = full(x,y);
-      while(c!=OCEAN && e > deps[c].out_elev) c = deps[c].parent;
-      if(c==OCEAN) return -1;
-      if(deps[c].lchild!=dh::NO_VALUE) return -2;
-      return (int)deps[c].pit_cell;
-    };
-    int ndiff=0, shown=0;
-    for(int y=0;y<full.height();y++) for(int x=0;x<full.width();x++){
-      if(full.isNoData(x,y)) continue;
-      if(rleaf(S,s_label,x,y)!=rleaf(G,gLabel,x,y)){
-        ndiff++;
-        if(shown++<6) std::cerr<<"  DIFF ("<<x<<","<<y<<") elev="<<full(x,y)
-                               <<" s="<<rleaf(S,s_label,x,y)<<" g="<<rleaf(G,gLabel,x,y)<<"\n";
-      }
-    }
-    std::cerr<<"leaf-assignment diff: "<<ndiff<<" cells\n";
-
-    // Is the residual node VALUES or tree TOPOLOGY? Compare the order-independent
-    // multiset of per-node (pit,out,cells,vol) descriptors.
-    const auto descriptors = [](const dh::DepressionHierarchy<float> &deps){
-      std::vector<std::string> v;
-      for(const auto &d : deps){
-        std::ostringstream os; os.setf(std::ios::fixed); os.precision(4);
-        os<<d.pit_elev<<","<<d.out_elev<<","<<d.cell_count<<","<<d.dep_vol;
-        v.push_back(os.str());
-      }
-      std::sort(v.begin(), v.end());
-      return v;
-    };
-    auto ds = descriptors(S), dg = descriptors(G);
-    int node_diffs = 0;
-    if(ds.size()==dg.size()) for(size_t i=0;i<ds.size();i++) if(ds[i]!=dg[i]) node_diffs++;
-    std::cerr<<"node-descriptor multiset diffs: "<<node_diffs<<" of "<<ds.size()
-             <<(node_diffs==0 ? "  (same nodes -> residual is TOPOLOGY)" : "  (residual is node VALUES)")<<"\n";
-  }
-
   const bool ok = (sig_stitch==sig_serial);
   std::cout<<(ok ? "STITCH-MATCH " : "STITCH-DIFFER ")<<in_name<<" splits="<<argv[3]<<"\n";
+
   if(!ok){
-    std::cerr<<"  serial: "<<sig_serial.substr(0,400)<<"\n";
-    std::cerr<<"  stitch: "<<sig_stitch.substr(0,400)<<"\n";
+    // Localize the divergence. `pit_of` identifies the depression a cell belongs to
+    // by that depression's pit cell (label-namespace-independent). raw (walk=false):
+    // serial's wavefront leaf vs the resolved gLabel that feeds outlet discovery.
+    // leaf (walk=true): the depression each cell ultimately resolves into.
+    const auto pit_of = [&](const dh::DepressionHierarchy<float> &deps,
+                            const rd::Array2D<dh_label_t> &lab, int x, int y, bool walk)->int{
+      dh_label_t c = lab(x,y);
+      if(walk){ const float e=full(x,y); while(c!=OCEAN && e>deps[c].out_elev) c=deps[c].parent; }
+      if(c==OCEAN) return -1;
+      if(walk && deps[c].lchild!=dh::NO_VALUE) return -2;   // meta: pit cell is order-dependent
+      return (int)deps[c].pit_cell;
+    };
+    int rawdiff=0, leafdiff=0;
+    for(int y=0;y<full.height();y++) for(int x=0;x<full.width();x++){
+      if(full.isNoData(x,y)) continue;
+      if(pit_of(S,s_label,x,y,false)!=pit_of(G,gLabel,x,y,false)) rawdiff++;
+      if(pit_of(S,s_label,x,y,true )!=pit_of(G,gLabel,x,y,true )) leafdiff++;
+    }
+    std::cerr<<"  raw-label diffs="<<rawdiff<<"  leaf-assignment diffs="<<leafdiff<<"\n";
+    std::cerr<<"  serial: "<<sig_serial.substr(0,300)<<"\n";
+    std::cerr<<"  stitch: "<<sig_stitch.substr(0,300)<<"\n";
   }
   return ok ? 0 : 1;
 }
