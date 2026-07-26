@@ -213,30 +213,37 @@ cross-tile neighbour `≤` its pit, so (b) rejects it. The conjunction **(a) ∧
 positives**, and by using `≤` it folds the boundary-spanning flat with the same test that handles the
 monotonic crossing.
 
-**Algorithm (O(#depressions) + O(boundary); handles multi-way splits — corners, long boundaries cut by
-several tiles):**
-1. Flag each artifact leaf by (a) ∧ (b) above. Grid-locality — the pit's cell and the tile of a column —
-   uses only the DEM and the 1-cell perimeter strips a distributed build already exchanges.
-2. Splice each artifact out of the **ocean-linked chain** it sits in. The artifact is ocean-linked into
-   the live container `P` it overflows into; reattach the artifact's own ocean-linked children to `P`
-   and drop the artifact. A flat cut by several seams stacks several artifacts in one chain — each
-   resolves *up the parent chain* to the first live container, so corners and long boundaries collapse
-   correctly. The artifact holds no volume (`out_elev == pit_elev`) and its lone high cell lies above
-   `P`'s outlet, so `P`'s `cell_count`/`dep_vol` already equal serial's — nothing to re-total.
-3. Compact: renumber the survivors densely and remap every label-valued field (`parent`, `odep`,
+**Algorithm (O(#depressions) + O(boundary)).** Flag each artifact leaf by (a) ∧ (b) above — grid-locality
+(the pit's cell, the tile of a column) uses only the DEM and the 1-cell perimeter strips a distributed
+build already exchanges. Each artifact appears in one of two forms, by where its pit sits:
+
+1. **Ocean-linked splice** — the real basin lives in one tile as a separate node `P`; the seam
+   manufactured an extra degenerate leaf ocean-linked *into* `P`. Drop the artifact and reattach its own
+   ocean-linked children to `P`. A flat cut by several seams stacks several artifacts in one chain —
+   each resolves *up the parent chain* to the first live container. The artifact holds no volume
+   (`out_elev == pit_elev`) and its high cell lies above `P`'s outlet, so `P`'s `cell_count`/`dep_vol`
+   already equal serial's — nothing to re-total.
+2. **Meta dissolve** — the basin's *pit* straddles the seam, so it has no home in either tile and the
+   stitch rebuilds it as a meta over the two tile-half artifact leaves. That meta already carries the
+   whole-basin aggregates (`out_elev`/`cell_count`/`dep_vol` == serial's), so dissolve it into one leaf
+   (`pit_elev` = the shared floor; pit cell = the higher-index half, i.e. the flood's seed) and drop both
+   halves. Volume is conserved either way — the refinement is exact, so **no halo is needed** (§6.6).
+3. **Compact** — renumber the survivors densely and remap every label-valued field (`parent`, `odep`,
    `geolink`, `lchild`, `rchild`, `ocean_linked[]`), redirecting any reference to a contracted node to
    its live container. O(#depressions).
 
-*(An artifact attached as a binary child of a meta, rather than by an ocean-link, would instead need the
-meta dissolved and the sibling rewired; the pass detects and reports that form but does not contract it.
-It did not arise in any validated case — see below.)*
+*(A column-split straddles exactly one vertical seam, so a pit splits into two halves — the case above. A
+2-D distributed build could split a **corner** pit N ways into nested metas of artifact leaves; that
+needs the recursive subtree-dissolve generalisation of form 2, not yet built.)*
 
 **Status — BUILT & VALIDATED (2026-07-26).** `CollapseSeamArtifacts(G, full, bounds)` in
 `tools/dephier_stitch.cpp`, run after `PhaseCD`. The concrete trigger was a **seam-straddling flat**:
 the fractal `--size 200 --beta 1.7 --seed 4` DEM at split 142, tie `{(141,182),(142,183)}=633.752`
 draining out via `(142,183)→(143,183)` — one tile sees its half as a zero-height pit, ocean-linked into
-its real container. The pass leaves genuine basins untouched (**zero over-collapses, zero binary-child
-forms**; ≈2 artifacts per ~1600 runs, matching the 1/195 estimate).
+its real container. The pass leaves genuine basins untouched (**zero over-collapses**; ≈2 artifacts per
+~1600 runs, matching the 1/195 estimate). The fractal sweep exercises only the ocean-linked form; the
+meta-dissolve form (pit *on* the seam) is exercised by the `edge_seam` fixture — MATCH across sizes 20–80
+at every split position (12/12), which is what resolved the §6.6 halo question (no halo needed).
 
 **The stitch now reproduces serial BIT-IDENTICALLY on every tested case: 1447/1447 MATCH**, 0 DIFFER
 (benign fixtures + multi-seam sweeps + exhaustive single-seam over fractal terrains, β 1.3–2.5, seeds
@@ -337,14 +344,15 @@ So a first-class deliverable is the **differential tester**:
    collapse criterion neither over-collapses (real saddle-on-boundary) nor under-collapses.
 5. Add a degenerate-tiling identity check: a **1×1 tiling must reproduce the serial tree bit-for-bit**
    with no collapse needed — this isolates namespace/remap bugs from genuine stitching effects.
-6. **On-edge (seam-hugging) depression fixtures — the halo decision.** Barnes' perimeter-strip join
-   uses no halo (§3), so the one case it may miss is a basin whose low cells straddle a tile seam:
-   both halves drain to the seam → both become `BOUNDARY` → the basin appears in *neither* tile's
-   depression list (§ "Q2 hard edges"). Include DEMs with a depression pit placed **exactly on the
-   seam** (via `tools/make_edge_depression_dem.py`) alongside an interior-pit control. If the stitch
-   reproduces the serial depression there, the strip suffices; if the oracle shows a *missing*
-   depression, that is the signal to add a 1-cell halo atop Barnes' approach. This fixture exists to
-   force that verdict rather than leave it to chance.
+6. **On-edge (seam-hugging) depression fixtures — the halo decision, RESOLVED: no halo.** Barnes'
+   perimeter-strip join uses no halo (§3), so the one case it may miss is a basin whose low cells
+   straddle a tile seam: both halves drain to the seam → both become `BOUNDARY` → the basin appears in
+   *neither* tile's depression list (§ "Q2 hard edges"). The `tools/make_edge_depression_dem.py` `seam`
+   fixture (pit **exactly on the seam**) plus `offset`/`interior` controls forces the verdict. **Result:
+   the strip suffices.** The basin is not missing — volume is conserved; the stitch rebuilds it as a meta
+   over the two tile-half artifact leaves, which §3.2's collapse dissolves into the serial-identical
+   single leaf. Bit-identity holds across sizes 20–80 at every split position (12/12). A 1-cell halo is
+   *not* required for the hierarchy; the refinement-plus-collapse recovers the serial tree.
 
 Wire it into CTest: the in-process variant runs everywhere with no MPI at all; the MPI variant runs
 the same comparison over a few `localhost` ranks where MPI is available.
