@@ -387,6 +387,67 @@ int main(int argc, char **argv){
     for(size_t i=0;i<bcells.size();i++) gLabel(bcells[i].first, bcells[i].second) = resolved[i];
   }
 
+  // ---- flowdir fix-up: restore serial-identical per-cell flowdirs at seam crossings ----
+  // A tile flood cannot point a cell across its own boundary, so a cell whose true
+  // drainage crosses the seam is left with a tile-local flowdir (NO_FLOW at a BOUNDARY
+  // seam seed). Every other cell already matches serial (measured: divergence is 100%
+  // seam-confined). The conduit pass already found each seam seed's cross-seam drain
+  // target, so point the seed's flowdir there -- the same steepest-descent, highest-index-
+  // tie direction the serial flood assigns. This is an O(boundary) edit using only the
+  // perimeter strip; here it produces a global field for validation against serial.
+  rd::Array2D<int8_t> gFix(full.width(), full.height(), rd::NO_FLOW);
+  for(auto &tile : tiles)
+    for(int y=0;y<tile.dem.height();y++)
+      for(int x=0;x<tile.dem.width();x++)
+        gFix(tile.x0 + x, y) = tile.fd(x, y);
+  const auto dir_to = [&](int dx,int dy)->int8_t{                 // D8 step -> flowdir index
+    for(int n=1;n<=8;n++) if(rd::d8x[n]==dx && rd::d8y[n]==dy) return (int8_t)n;
+    return rd::NO_FLOW;
+  };
+  for(auto &tile : tiles)
+    for(int y=0;y<tile.dem.height();y++)
+      for(int x=0;x<tile.dem.width();x++){
+        const int gx=tile.x0+x;
+        if(tile.fd(x,y)==rd::NO_FLOW && !full.isNoData(gx,y) && tile.label(x,y)!=OCEAN){
+          // A cell the tile flood left as a local pit (NO_FLOW) but whose true drainage
+          // exits across the seam: a land seam seed (strictly-lower cross neighbour) or a
+          // seam-straddling flat (equal cross neighbour). Serial claims it from its lowest
+          // cross-tile neighbour AT OR BELOW its elevation, ties by highest cell index
+          // (matching the flood). A genuine global pit has no such neighbour -> stays
+          // NO_FLOW, as in serial.
+          const float fe = full(gx,y); const long fi = full.xyToI(gx,y);
+          int bnx=0,bny=0; long bi=-1; float be=std::numeric_limits<float>::infinity();
+          for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+            if(!dx && !dy) continue;
+            const int nx=gx+dx, ny=y+dy;
+            if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
+            if(tile_of(nx)==tile_of(gx)) continue;                     // cross-seam neighbours only
+            const float e=full(nx,ny); if(e>fe) continue;             // at or below the pit
+            const long idx=full.xyToI(nx,ny);
+            if(e<be || (e==be && idx>bi)){ be=e; bi=idx; bnx=nx; bny=ny; }
+          }
+          // Apply if that neighbour is strictly lower, or an equal-elevation cell of
+          // HIGHER index -- the flood makes the highest-index cell of a straddling flat
+          // the pit and points the others at it, so an equal lower-index neighbour means
+          // THIS cell is the pit (leave it NO_FLOW).
+          if(bi>=0 && (be<fe || bi>fi)) gFix(gx,y) = dir_to(bnx-gx, bny-y);
+        } else if(tile.label(x,y)==OCEAN && !full.isNoData(gx,y)){    // sea-draining cell
+          // serial claims a sea-draining cell from its HIGHEST-index adjacent ocean cell
+          // (all ocean seeds, popped highest-index-first). When that lies across the seam
+          // the tile picks a different one; restore serial's choice.
+          int bi=-1, bnx=0, bny=0;
+          for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+            if(!dx && !dy) continue;
+            const int nx=gx+dx, ny=y+dy;
+            if(!full.inGrid(nx,ny) || !is_ocean(nx,ny)) continue;
+            const int idx=full.xyToI(nx,ny);
+            if(idx>bi){ bi=idx; bnx=nx; bny=ny; }
+          }
+          if(bi>=0 && tile_of(bnx)!=tile_of(gx))                       // highest ocean nbr is across seam
+            gFix(gx,y) = dir_to(bnx-gx, bny-y);
+        }
+      }
+
   // ---- global outlet set, in the distributable shape (Barnes' join): each tile
   // derives its own outlets from its resolved labels (intra-tile adjacencies), and
   // only the perimeter strips cross the seam via HandleEdge. Both feed one database
@@ -454,6 +515,20 @@ int main(int argc, char **argv){
   auto s_label = ocean_labels(full, ocean_level);
   rd::Array2D<int8_t> s_fd(full.width(), full.height(), rd::NO_FLOW);
   auto S = dh::GetDepressionHierarchy<float,rd::Topology::D8>(full, s_label, s_fd);
+
+  // ---- flowdir check: the fixed-up tiled flowdirs must equal serial's, cell for cell ----
+  bool flowdir_ok = true;
+  {
+    long land=0, fdiff=0;
+    for(unsigned int i=0;i<full.size();i++){
+      if(full.isNoData(i)) continue;
+      land++;
+      if(gFix(i)!=s_fd(i)) fdiff++;
+    }
+    flowdir_ok = (fdiff==0);
+    std::cout<<(flowdir_ok ? "FLOWDIR-MATCH " : "FLOWDIR-DIFFER ")<<in_name
+             <<" fd_diff="<<fdiff<<"/"<<land<<"\n";
+  }
 
   // ---- compare ----
   const std::string sig_stitch = dhtest::canonicalize(G);
@@ -532,5 +607,5 @@ int main(int argc, char **argv){
     std::cerr<<"  serial: "<<sig_serial.substr(0,300)<<"\n";
     std::cerr<<"  stitch: "<<sig_stitch.substr(0,300)<<"\n";
   }
-  return ok ? 0 : 1;
+  return (ok && flowdir_ok) ? 0 : 1;   // bit-identity = tree (canonical) AND per-cell flowdirs
 }
