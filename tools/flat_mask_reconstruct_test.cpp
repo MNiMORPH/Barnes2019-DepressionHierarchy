@@ -24,6 +24,8 @@
 // This test proves (A) == (B) bit-for-bit on a synthetic flat. (C) is validated separately, in
 // the harness, against (B). If this test ever fails, the label<->elevation-adjacency equivalence
 // that ENH-1 relies on has been broken and the distributed flat resolution is unsound.
+#include "dh_flats.hpp"   // resolve_flat_flowdirs (reference) + resolve_flat_flowdirs_option2 (ENH-1)
+
 #include <richdem/common/Array2D.hpp>
 #include <richdem/common/grid_cell.hpp>
 #include <richdem/flowmet/d8_flowdirs.hpp>
@@ -103,9 +105,17 @@ int main(){
     if(mask(i)!=fm_ref(i)) mask_diff++;
     if(lab(i)>0 && fh(i)!=fh_label[lab(i)]) fh_diff++;
   }
-  const bool ok = (mask_diff==0 && fh_diff==0);
+  // Also check the end-to-end flowdir producer: resolve_flat_flowdirs_option2 (the label-free
+  // relaxation form used by ENH-1) must equal the reference resolve_flat_flowdirs, flowdir for flowdir.
+  rd::Array2D<int8_t> fa=sd, fb=sd;
+  resolve_flat_flowdirs(dem, fa);            // richdem-based reference (full grid)
+  resolve_flat_flowdirs_option2(dem, fb);    // ENH-1 relaxation reconstruction
+  long fd_diff=0; for(int i=0;i<(int)fa.size();i++) if(fa(i)!=fb(i)) fd_diff++;
+
+  const bool ok = (mask_diff==0 && fh_diff==0 && fd_diff==0);
   std::cout<<(ok?"FLAT-RECONSTRUCT-OK":"FLAT-RECONSTRUCT-DIFFER")
            <<" flat_cells="<<flats<<" high_edges="<<high_edges.size()<<" low_edges="<<low_edges.size()
-           <<" mask_diff="<<mask_diff<<" label_free_flat_height_diff="<<fh_diff<<"\n";
+           <<" mask_diff="<<mask_diff<<" label_free_flat_height_diff="<<fh_diff
+           <<" option2_flowdir_diff="<<fd_diff<<"\n";
   return ok?0:1;
 }
