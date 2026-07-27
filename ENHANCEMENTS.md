@@ -8,8 +8,17 @@ be posted to the MNiMORPH fork's tracker when wanted.
 
 ## ENH-1: bit-identical O(boundary) distributed flat resolution ("option 2")
 
-**Status:** designed, deferred (the problem is already *bounded* by option 3; this recovers
-bit-identity on the giant-flat tail without growing per-rank memory). Build on the MPI harness.
+**Status:** DONE (2026-07-27, commits `23bba02` core, `0abce35` harness integration). The label-free
+three-relaxation form (`resolve_flat_flowdirs_option2`, `tools/dh_flats.hpp`) is bit-identical to
+richdem's `resolve_flat_flowdirs` on the edge fixtures AND all kerry fractals, and is now the harness
+flat pass (MPI-FLOWDIR-MATCH), superseding option 3's halo cap. It is O(boundary) for ANY flat extent.
+*Remaining (same class of gap as the per-cell MPI verification):* the harness runs the relaxations on
+the whole grid in-process; a real-MPI build runs the identical D8-stencil relaxations per tile with a
+1-column seam exchange per round (structurally evident, not yet a separate driver). See the VALIDATED
+SIMPLIFICATION note below for the mechanism, and `tools/flat_mask_reconstruct_test.cpp` for the proof.
+
+Original framing (kept for context): designed, deferred (the problem was already *bounded* by option 3;
+this recovers bit-identity on the giant-flat tail without growing per-rank memory).
 
 **Type:** enhancement / performance-quality. Not a blocker.
 
