@@ -2,6 +2,8 @@ cmake_minimum_required (VERSION 3.9)
 
 project(dephier)
 
+enable_testing()
+
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 find_package(GDAL)
@@ -31,6 +33,18 @@ if(USE_GDAL AND GDAL_FOUND)
 
   add_executable(dephier_stitch.exe tools/dephier_stitch.cpp)
   target_link_libraries(dephier_stitch.exe PRIVATE dephier richdem)
+
+  # Boundary-behavior tests (PARALLEL_DEPHIER_PLAN.md section 6, differential oracle).
+  # The tiled stitch must reproduce the serial DepressionHierarchy -- tree AND per-cell
+  # flowdirs -- bit-identically. The `seam` fixture puts a depression pit straddling the
+  # tile seam (the halo-decision stress case); `offset`/`interior` are near-seam and
+  # in-tile controls. dephier_stitch.exe exits 0 iff bit-identical.
+  foreach(mode seam offset interior)
+    add_test(
+      NAME    stitch_edge_${mode}
+      COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/edge_${mode}.dem -9999 20
+    )
+  endforeach()
 
   install(TARGETS dephier.exe DESTINATION bin)
   install(TARGETS dephier_paper_tests.exe DESTINATION bin)
