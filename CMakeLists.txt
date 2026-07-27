@@ -43,13 +43,14 @@ if(USE_GDAL AND GDAL_FOUND)
   target_include_directories(dephier_mpi.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(dephier_mpi.exe PRIVATE dephier richdem Threads::Threads)
 
-  # Increment 1: distributed per-rank PhaseAB (BOUNDARY from a 1-column halo) must be
-  # bit-identical to the full-grid oracle. Same seam/offset/interior fixtures as the stitch,
-  # split at column 20; exits 0 iff label+flowdir match. (2 ranks and 3 ranks.)
+  # The distributed pipeline (built incrementally) must be bit-identical to the in-binary
+  # oracle at every stage implemented so far: per-rank PhaseAB (BOUNDARY from a 1-column halo)
+  # and the namespace remap (global offsets + label grid). dephier_mpi.exe exits 0 iff every
+  # implemented stage matches. Same seam/offset/interior fixtures as the stitch, 2 and 3 ranks.
   foreach(mode seam offset interior)
-    add_test(NAME mpi_phaseab_${mode}_2rank
+    add_test(NAME mpi_pipeline_${mode}_2rank
              COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/edge_${mode}.dem -9999 20)
-    add_test(NAME mpi_phaseab_${mode}_3rank
+    add_test(NAME mpi_pipeline_${mode}_3rank
              COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/edge_${mode}.dem -9999 13,26)
   endforeach()
 

@@ -122,8 +122,22 @@ int main(int argc, char **argv){
     return found;
   };
 
-  struct Result { rd::Array2D<dh_label_t> label; rd::Array2D<int8_t> fd; int nboundary=0; };
+  struct Result {
+    rd::Array2D<dh_label_t> label;      // tile-LOCAL labels (OCEAN/BOUNDARY sentinels + local deps)
+    rd::Array2D<int8_t>     fd;
+    rd::Array2D<dh_label_t> glab;        // tile slice remapped into the GLOBAL namespace (pre-conduit)
+    int        nboundary = 0;
+    int        ndep      = 0;            // local depressions, excl. ocean node 0 (deps.size()-1)
+    dh_label_t offset    = 0;            // this tile's global label offset (prefix sum)
+  };
   std::vector<Result> oracle(ntiles), dist(ntiles);
+
+  // Local label -> global label. Sentinels (OCEAN, BOUNDARY) are global as-is; a real local
+  // depression k maps to offset+(k-1). Identical to Tile::g() in the stitch.
+  const auto gmap = [&](dh_label_t local, dh_label_t offset)->dh_label_t{
+    if(local==OCEAN || local==BOUNDARY) return local;
+    return offset + (local - 1);
+  };
 
   for(int t=0;t<ntiles;t++){
     const int x0=bounds[t], x1=bounds[t+1];
@@ -143,11 +157,26 @@ int main(int argc, char **argv){
     rd::Array2D<int8_t> fd(dem.width(), dem.height(), rd::NO_FLOW);
     dh::DepressionHierarchy<float> deps; std::vector<dh::Outlet<float>> outlets;
     dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem, label, fd, deps, outlets);
-    oracle[t] = { std::move(label), std::move(fd), nb };
+    oracle[t].label = std::move(label);
+    oracle[t].fd    = std::move(fd);
+    oracle[t].nboundary = nb;
+    oracle[t].ndep  = (int)deps.size() - 1;
+  }
+  // Oracle namespace remap: prefix-sum the per-tile depression counts (the stitch's next_offset
+  // accumulation), then map each tile's local labels into the global grid (BOUNDARY unresolved).
+  rd::Array2D<dh_label_t> gLabel_oracle(W, H, OCEAN);
+  {
+    dh_label_t next = 1;
+    for(int t=0;t<ntiles;t++){ oracle[t].offset = next; next += oracle[t].ndep; }
+    for(int t=0;t<ntiles;t++){
+      const int x0=bounds[t], x1=bounds[t+1];
+      for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)
+        gLabel_oracle(x,y) = gmap(oracle[t].label(x-x0,y), oracle[t].offset);
+    }
   }
 
   // ---- DISTRIBUTED: one thread-rank per tile, BOUNDARY from a 1-column halo ----
-  enum { TAG_L2R=1, TAG_R2L=2 };   // strip travels toward r+1 / toward r-1
+  enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4 };   // strip dirs; count->rank0; offset->rank r
   auto rank_main = [&](){
     const int r  = c::CommRank();
     const int x0 = bounds[r], x1 = bounds[r+1], w = x1-x0;
@@ -209,7 +238,35 @@ int main(int argc, char **argv){
     rd::Array2D<int8_t> fd(dem.width(), dem.height(), rd::NO_FLOW);
     dh::DepressionHierarchy<float> deps; std::vector<dh::Outlet<float>> outlets;
     dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem, label, fd, deps, outlets);
-    dist[r] = { std::move(label), std::move(fd), nb };            // ranks write disjoint slots
+
+    // Namespace remap (eng-doc component 6): gather per-tile depression counts to rank 0,
+    // prefix-sum into global offsets, scatter each rank its offset. This is the shim analogue
+    // of MPI_Allgather(count) + prefix sum -- O(ntiles) tiny messages, no per-cell data.
+    const int mycount = (int)deps.size() - 1;
+    dh_label_t myoffset = 1;
+    if(r==0){
+      std::vector<int> counts(ntiles); counts[0]=mycount;
+      for(int t=1;t<ntiles;t++) c::CommRecv(counts[t], t, TAG_COUNT);
+      dh_label_t off = 1;
+      for(int t=0;t<ntiles;t++){                                  // prefix sum in tile order
+        const dh_label_t this_off = off; off += counts[t];
+        if(t==0) myoffset = this_off; else c::CommSend(this_off, t, TAG_OFFSET);
+      }
+    } else {
+      c::CommSend(mycount, 0, TAG_COUNT);
+      c::CommRecv(myoffset, 0, TAG_OFFSET);
+    }
+
+    // Map this rank's local labels into the global namespace (its own slice; no gather).
+    rd::Array2D<dh_label_t> glab(w, H);
+    for(int y=0;y<H;y++) for(int x=0;x<w;x++) glab(x,y) = gmap(label(x,y), myoffset);
+
+    dist[r].label = std::move(label);                            // ranks write disjoint slots
+    dist[r].fd    = std::move(fd);
+    dist[r].glab  = std::move(glab);
+    dist[r].nboundary = nb;
+    dist[r].ndep  = mycount;
+    dist[r].offset= myoffset;
     c::CommBarrier();
   };
   c::CommInit(ntiles, rank_main);
@@ -224,9 +281,27 @@ int main(int argc, char **argv){
       if(oracle[t].fd(i)   !=dist[t].fd(i))    fdiff++;
     }
   }
-  const bool ok = (ldiff==0 && fdiff==0);
-  std::cout<<(ok ? "MPI-PHASEAB-MATCH " : "MPI-PHASEAB-DIFFER ")<<in_name
+  const bool phaseab_ok = (ldiff==0 && fdiff==0);
+  std::cout<<(phaseab_ok ? "MPI-PHASEAB-MATCH " : "MPI-PHASEAB-DIFFER ")<<in_name
            <<" ranks="<<ntiles<<" label_diff="<<ldiff<<" fd_diff="<<fdiff<<"/"<<cells
            <<" boundary(oracle="<<nb_o<<" dist="<<nb_d<<")\n";
-  return ok ? 0 : 1;
+
+  // ---- remap check: global offsets + the assembled global label grid (pre-conduit) must
+  // equal the stitch's assembly, cell for cell. ----
+  long odiff=0, gdiff=0;
+  rd::Array2D<dh_label_t> gLabel_dist(W, H, OCEAN);
+  for(int t=0;t<ntiles;t++){
+    if(dist[t].offset != oracle[t].offset) odiff++;
+    const int x0=bounds[t], x1=bounds[t+1];
+    for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)
+      gLabel_dist(x,y) = dist[t].glab(x-x0,y);
+  }
+  for(unsigned i=0;i<gLabel_oracle.size();i++)
+    if(gLabel_oracle(i)!=gLabel_dist(i)) gdiff++;
+  const bool remap_ok = (odiff==0 && gdiff==0);
+  std::cout<<(remap_ok ? "MPI-REMAP-MATCH " : "MPI-REMAP-DIFFER ")<<in_name
+           <<" ranks="<<ntiles<<" offset_diff="<<odiff<<"/"<<ntiles
+           <<" glabel_diff="<<gdiff<<"/"<<cells<<" n_global="<<(oracle[ntiles-1].offset+oracle[ntiles-1].ndep)<<"\n";
+
+  return (phaseab_ok && remap_ok) ? 0 : 1;
 }
