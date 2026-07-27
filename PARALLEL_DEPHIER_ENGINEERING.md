@@ -219,10 +219,12 @@ Richard (integration reuse, plan §10) — worth a message, but not a blocker to
 
 ---
 
-## 6. Per-cell flowdirs across seams — status + the flat determinism case
+## 6. Per-cell flowdirs across seams — RESOLVED (tree + flowdirs both bit-identical)
 
 `GetDepressionHierarchy` returns a per-cell `flowdirs` array alongside the tree. The distributed build
-must reproduce it too (FSM routes runoff along flowdirs into the depressions).
+must reproduce it too (FSM routes runoff along flowdirs into the depressions). **Both were closed: the
+tiled stitch is now bit-identical to serial in tree AND per-cell flowdirs, 1521/1521 both**, with no step
+reading the full grid. Two mechanisms, below.
 
 **Non-flat crossings — DONE (bit-identical).** A tile flood cannot point a cell across its own boundary,
 so seam-crossing cells kept a tile-local direction. The stitch's flowdir fix-up (commit `c47cb9e`)
@@ -231,8 +233,8 @@ lowest cross-tile neighbour ≤ the pit (highest-index tie); a sea-draining cell
 adjacent ocean cell. Result: **flowdirs are bit-identical to serial across the entire fractal sweep**
 (β 1.3–2.5, seeds 1–15, single/multi-seam) — 0 diffs wherever flow direction is physically determined.
 
-**Flat plateaus crossing a seam — KNOWN GAP (the determinism case).** On a large flat, DH assigns each
-cell's direction as an **order-dependent byproduct of the flood** (`dephier.hpp:524` — the cell points to
+**Flat plateaus crossing a seam — RESOLVED via `resolve_flats` (moves 1–2 below).** On a large flat, DH
+assigns each cell's direction as an **order-dependent byproduct of the flood** (`dephier.hpp:524` — the cell points to
 whichever neighbour claimed it, set by the global radix pop order). When a seam cuts a flat, each tile
 runs that claim from only its share of the flat's exits, so the in-flat routing differs — and the
 difference propagates across the whole flat, not just the seam (measured 177/6084 cells on an 80×80
@@ -265,12 +267,15 @@ seams). Caveats: mesas (flats with no low edge) — `resolve_flats` handles them
   including the flat plateaus that diverged 177 cells under the flood byproduct). Non-flat flowdirs and
   the tree are untouched. *Caveat: move 1 runs `resolve_flats` on the FULL grid for the tiled side — it
   proves correctness but is not yet footprint-bounded.*
-- **Move 2 (footprint-bounded distribution) — measured tractable.** Per-tile-independent `resolve_flats`
-  already agrees with the full-grid result everywhere except a bounded near-seam band; and a small
-  boundary **halo** closes it fast — on the 80-wide plateau, diff falls 120 (halo 0) → 44 (2) → 4 (4) →
-  **0 (halo 8)**. So the distributed form is per-tile `resolve_flats` + an **iterative seam-strip
-  exchange** (equivalently: grow the halo until the owned region stabilizes; ~propagation-depth rounds,
-  O(boundary) per round) — the same edge-strip machinery the MPI build already needs. It converges fast
-  because the geometry-deterministic routing is locally determined away from the seam. **Recommendation:**
-  implement move 2 as part of the MPI harness (its edge-strip exchange is the natural home); until then
-  the in-process harness uses the full-grid form (move 1), which is correct.
+- **Move 2 (footprint-bounded distribution) — DONE (commit `324380f`).**
+  `resolve_flat_flowdirs_distributed`: each tile runs `resolve_flats` on itself plus an **adaptive
+  boundary halo**, grown (×2) until its OWNED region stops changing — a purely local convergence test, no
+  full grid. It reproduces the full-grid result **exactly** because the geometry-deterministic routing is
+  locally determined away from the seam (measured on the 80-wide plateau: full-grid vs per-tile diff falls
+  120 → 44 → 4 → **0** at halo 0/2/4/8; multi-seam converges the same). **No step of the stitch now reads
+  the full grid** (conduits and flats both footprint-bounded). Validated **1521/1521 tree AND 1521/1521
+  flowdir** (fractals + edge fixtures, single and multi-seam), confirmed first with a throwaway minimal
+  test per the numerical-model workflow. *Footprint caveat:* the halo is bounded by the flat's cross-seam
+  **extent**, not strictly O(boundary) — efficient for typical flats; a continent-spanning plateau would
+  need a proportionally larger halo, or the strict-O(boundary) refinement (a 1-cell iterative gradient
+  exchange, one cell of propagation per round). The MPI build can use either — same edge-strip machinery.
