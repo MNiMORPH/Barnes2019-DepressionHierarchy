@@ -27,7 +27,9 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rd = richdem;
@@ -66,6 +68,16 @@ struct EdgeStrip {
   std::vector<uint8_t> ocean;
   template<class Ar> void serialize(Ar &ar){ ar(elev, ocean); }
 };
+
+// Conduit resolution messages (eng-doc section 2), all keyed on a global (gx,gy) cell.
+//   LWRec  -- a BOUNDARY cell's Phase-1 result: a terminal GLOBAL label, or an EXIT to a
+//             cross-seam cell (ex,ey). One per BOUNDARY cell (O(boundary) per rank).
+//   CellLab-- (gx,gy)->global label; used both for shipping a rank's edge-column labels
+//             (so rank 0 can read an EXIT target's label) and for scattering resolved labels.
+struct LWRec  { int32_t gx,gy; uint8_t terminal; dh_label_t label; int32_t ex,ey;
+                template<class Ar> void serialize(Ar &ar){ ar(gx,gy,terminal,label,ex,ey); } };
+struct CellLab{ int32_t gx,gy; dh_label_t label;
+                template<class Ar> void serialize(Ar &ar){ ar(gx,gy,label); } };
 
 int main(int argc, char **argv){
   if(argc!=4){
@@ -126,6 +138,7 @@ int main(int argc, char **argv){
     rd::Array2D<dh_label_t> label;      // tile-LOCAL labels (OCEAN/BOUNDARY sentinels + local deps)
     rd::Array2D<int8_t>     fd;
     rd::Array2D<dh_label_t> glab;        // tile slice remapped into the GLOBAL namespace (pre-conduit)
+    rd::Array2D<dh_label_t> glab_pc;     // same, after conduit resolution (BOUNDARY cells resolved)
     int        nboundary = 0;
     int        ndep      = 0;            // local depressions, excl. ocean node 0 (deps.size()-1)
     dh_label_t offset    = 0;            // this tile's global label offset (prefix sum)
@@ -175,8 +188,48 @@ int main(int argc, char **argv){
     }
   }
 
+  // ORACLE conduit resolution (the stitch's boundary-graph pass, on the oracle tiles with a
+  // full-grid drain): resolve every BOUNDARY cell to the real depression/ocean it drains into.
+  // Phase 1 localwalk follows each tile's own fd to a local terminal or a seam exit; Phase 2
+  // chase follows exits across tiles to a terminal. Produces the post-conduit global grid.
+  rd::Array2D<dh_label_t> gLabel_oracle_pc = gLabel_oracle;
+  {
+    struct LW { bool terminal; dh_label_t label; int ex,ey; };
+    const auto localwalk = [&](int t,int gx,int gy)->LW{
+      const int x0=bounds[t];
+      for(unsigned guard=0; guard<=oracle[t].label.size(); guard++){
+        const dh_label_t ll = oracle[t].label(gx-x0,gy);
+        if(ll!=BOUNDARY) return { true, gmap(ll,oracle[t].offset), 0,0 };
+        const int8_t f = oracle[t].fd(gx-x0,gy);
+        if(f!=rd::NO_FLOW){ gx+=rd::d8x[f]; gy+=rd::d8y[f]; }
+        else { int nx,ny; bool toO;
+          if(!drain_full(gx,gy,nx,ny,toO) || toO) return { true, OCEAN, 0,0 };
+          return { false, OCEAN, nx, ny }; }
+      }
+      return { true, OCEAN, 0,0 };
+    };
+    std::map<std::pair<int,int>,LW> res;
+    for(int t=0;t<ntiles;t++)
+      for(int y=0;y<H;y++)
+        for(int gx=bounds[t];gx<bounds[t+1];gx++)
+          if(oracle[t].label(gx-bounds[t],y)==BOUNDARY) res[{gx,y}] = localwalk(t,gx,y);
+    const auto chase = [&](int gx,int gy)->dh_label_t{
+      for(unsigned guard=0; guard<=res.size()+1; guard++){
+        const LW &r = res.at({gx,gy});
+        if(r.terminal) return r.label;
+        const int nt = tile_of(r.ex);
+        const dh_label_t nl = oracle[nt].label(r.ex-bounds[nt], r.ey);
+        if(nl!=BOUNDARY) return gmap(nl, oracle[nt].offset);
+        gx=r.ex; gy=r.ey;
+      }
+      return OCEAN;
+    };
+    for(const auto &kv : res) gLabel_oracle_pc(kv.first.first, kv.first.second) = chase(kv.first.first, kv.first.second);
+  }
+
   // ---- DISTRIBUTED: one thread-rank per tile, BOUNDARY from a 1-column halo ----
-  enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4 };   // strip dirs; count->rank0; offset->rank r
+  enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4,     // strip dirs; count->rank0; offset->rank r
+         TAG_LW=5, TAG_EDGE=6, TAG_RESOLVED=7 };              // conduit: Phase-1 recs / edge labels / results
   auto rank_main = [&](){
     const int r  = c::CommRank();
     const int x0 = bounds[r], x1 = bounds[r+1], w = x1-x0;
@@ -208,7 +261,7 @@ int main(int argc, char **argv){
       return haloR.ocean[y];
     };
     // Rank-local drain: same rule as drain_full, but reading only own columns + halos.
-    const auto drain_local = [&](int gx,int y,int &lx,bool &to_ocean)->bool{
+    const auto drain_local = [&](int gx,int y,int &lx,int &ly,bool &to_ocean)->bool{
       const float focal = elev(gx,y);
       float best = std::numeric_limits<float>::infinity(); bool found=false; to_ocean=false;
       for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
@@ -218,7 +271,7 @@ int main(int argc, char **argv){
         if(is_ocean(nx,ny)){ to_ocean=true; continue; }
         const float e = elev(nx,ny);
         if(e >= focal) continue;
-        if(e <= best){ best=e; lx=nx; found=true; }              // <= : higher-index tie wins
+        if(e <= best){ best=e; lx=nx; ly=ny; found=true; }        // <= : higher-index tie wins
       }
       return found;
     };
@@ -231,8 +284,8 @@ int main(int argc, char **argv){
       for(int y=0;y<H;y++){
         const int lc = gc - x0;
         if(label(lc,y)!=NO_DEP) continue;
-        int lx; bool to_ocean;
-        if(drain_local(gc,y,lx,to_ocean) && !to_ocean && tile_of(lx)!=r){ label(lc,y)=BOUNDARY; nb++; }
+        int lx,ly; bool to_ocean;
+        if(drain_local(gc,y,lx,ly,to_ocean) && !to_ocean && tile_of(lx)!=r){ label(lc,y)=BOUNDARY; nb++; }
       }
 
     rd::Array2D<int8_t> fd(dem.width(), dem.height(), rd::NO_FLOW);
@@ -261,9 +314,82 @@ int main(int argc, char **argv){
     rd::Array2D<dh_label_t> glab(w, H);
     for(int y=0;y<H;y++) for(int x=0;x<w;x++) glab(x,y) = gmap(label(x,y), myoffset);
 
+    // ---- distributed conduit resolution (eng-doc section 2, v1 gather-and-resolve) ----
+    // PHASE 1 (LOCAL): walk each BOUNDARY cell along this tile's own fd to a local terminal
+    // (a global label) or, at a NO_FLOW seam seed, hand off across the seam (drain_local uses
+    // the halo). Emits one O(boundary) LWRec per BOUNDARY cell. Also publish this tile's
+    // edge-column global labels so rank 0 can read an EXIT target's label. Nothing but these
+    // O(boundary) records leaves the rank.
+    std::vector<LWRec>  mylw;
+    std::vector<CellLab> myedge;
+    const auto localwalk = [&](int gx,int gy)->LWRec{
+      int cx=gx, cy=gy;
+      for(unsigned guard=0; guard<=label.size(); guard++){
+        const dh_label_t ll = label(cx-x0,cy);
+        if(ll!=BOUNDARY) return { gx,gy, 1, gmap(ll,myoffset), 0,0 };   // local terminal
+        const int8_t f = fd(cx-x0,cy);
+        if(f!=rd::NO_FLOW){ cx+=rd::d8x[f]; cy+=rd::d8y[f]; }           // stays in this tile
+        else { int nx,ny; bool toO;                                    // seam seed: cross the strip
+          if(!drain_local(cx,cy,nx,ny,toO) || toO) return { gx,gy, 1, OCEAN, 0,0 };
+          return { gx,gy, 0, 0, nx,ny }; }                             // EXIT to neighbour cell
+      }
+      return { gx,gy, 1, OCEAN, 0,0 };
+    };
+    for(int y=0;y<H;y++)                                               // ALL BOUNDARY cells: the label
+      for(int gx=x0;gx<x1;gx++)                                        // spreads inward through PhaseAB,
+        if(label(gx-x0,y)==BOUNDARY) mylw.push_back(localwalk(gx,y));  // not just the seeded seam cells
+    for(int gc : seam_cols)                                            // edge-column labels (EXIT targets
+      for(int y=0;y<H;y++) myedge.push_back({ gc, y, glab(gc-x0,y) }); // land on a neighbour's edge column)
+
+    // PHASE 2 (rank 0): gather the O(boundary) records, chase each BOUNDARY cell to its
+    // terminal, scatter the resolved labels back to their owning rank.
+    std::vector<CellLab> myresolved;
+    if(r==0){
+      std::map<std::pair<int,int>,LWRec>     lwmap;
+      std::map<std::pair<int,int>,dh_label_t> edgemap;
+      const auto absorb = [&](const std::vector<LWRec> &lw, const std::vector<CellLab> &ed){
+        for(const auto &q : lw) lwmap[{q.gx,q.gy}] = q;
+        for(const auto &e : ed) edgemap[{e.gx,e.gy}] = e.label;
+      };
+      absorb(mylw, myedge);
+      for(int t=1;t<ntiles;t++){
+        std::vector<LWRec> lw; std::vector<CellLab> ed;
+        c::CommRecv(lw, t, TAG_LW); c::CommRecv(ed, t, TAG_EDGE);
+        absorb(lw, ed);
+      }
+      const auto chase = [&](int gx,int gy)->dh_label_t{
+        int cx=gx, cy=gy;
+        for(unsigned guard=0; guard<=lwmap.size()+1; guard++){
+          const LWRec &q = lwmap.at({cx,cy});
+          if(q.terminal) return q.label;
+          const auto it = edgemap.find({q.ex,q.ey});                  // EXIT target's global label
+          const dh_label_t nl = (it==edgemap.end()) ? OCEAN : it->second;
+          if(nl!=BOUNDARY) return nl;                                 // terminal across the seam
+          cx=q.ex; cy=q.ey;                                           // else chain on its LWRec
+        }
+        return OCEAN;
+      };
+      std::vector<std::vector<CellLab>> out(ntiles);                  // resolved labels per owning rank
+      for(const auto &kv : lwmap){
+        const int gx=kv.first.first, gy=kv.first.second;
+        out[tile_of(gx)].push_back({ gx, gy, chase(gx,gy) });
+      }
+      for(int t=1;t<ntiles;t++) c::CommSend(out[t], t, TAG_RESOLVED);
+      myresolved = std::move(out[0]);
+    } else {
+      c::CommSend(mylw,   0, TAG_LW);
+      c::CommSend(myedge, 0, TAG_EDGE);
+      c::CommRecv(myresolved, 0, TAG_RESOLVED);
+    }
+
+    // Overlay the resolved BOUNDARY labels onto this rank's global-label slice.
+    rd::Array2D<dh_label_t> glab_pc = glab;
+    for(const auto &c2 : myresolved) glab_pc(c2.gx-x0, c2.gy) = c2.label;
+
     dist[r].label = std::move(label);                            // ranks write disjoint slots
     dist[r].fd    = std::move(fd);
     dist[r].glab  = std::move(glab);
+    dist[r].glab_pc = std::move(glab_pc);
     dist[r].nboundary = nb;
     dist[r].ndep  = mycount;
     dist[r].offset= myoffset;
@@ -303,5 +429,23 @@ int main(int argc, char **argv){
            <<" ranks="<<ntiles<<" offset_diff="<<odiff<<"/"<<ntiles
            <<" glabel_diff="<<gdiff<<"/"<<cells<<" n_global="<<(oracle[ntiles-1].offset+oracle[ntiles-1].ndep)<<"\n";
 
-  return (phaseab_ok && remap_ok) ? 0 : 1;
+  // ---- conduit check: the resolved global label grid (BOUNDARY cells now resolved) must
+  // equal the stitch's post-conduit grid, cell for cell. ----
+  long cdiff=0, nboundary=0;
+  rd::Array2D<dh_label_t> gLabel_dist_pc(W, H, OCEAN);
+  for(int t=0;t<ntiles;t++){
+    const int x0=bounds[t], x1=bounds[t+1];
+    for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)
+      gLabel_dist_pc(x,y) = dist[t].glab_pc(x-x0,y);
+  }
+  for(unsigned i=0;i<gLabel_oracle_pc.size();i++){
+    if(gLabel_oracle(i)==BOUNDARY) nboundary++;          // cells the conduit had to resolve
+    if(gLabel_oracle_pc(i)!=gLabel_dist_pc(i)) cdiff++;
+  }
+  const bool conduit_ok = (cdiff==0);
+  std::cout<<(conduit_ok ? "MPI-CONDUIT-MATCH " : "MPI-CONDUIT-DIFFER ")<<in_name
+           <<" ranks="<<ntiles<<" conduit_diff="<<cdiff<<"/"<<cells
+           <<" boundary_resolved="<<nboundary<<"\n";
+
+  return (phaseab_ok && remap_ok && conduit_ok) ? 0 : 1;
 }
