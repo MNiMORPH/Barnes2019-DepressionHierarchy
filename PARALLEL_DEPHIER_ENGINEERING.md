@@ -256,8 +256,21 @@ exactly what the flood byproduct is not. Cost to make flat flowdirs bit-identica
      iterates to convergence (rounds ~ flat diameter in tiles; O(boundary) per round). Then
      `d8_masked_FlowDir` is a purely local read of the mask.
 This is far cheaper than the intractable alternative (reproducing the flood's global pop order across
-seams). Caveats: mesas (flats with no low edge) — `resolve_flats` handles them; a plateau spanning many
-tiles needs more iteration rounds, but each is footprint-bounded. **Recommendation:** adopt
-`resolve_flats` for flat routing (it improves the serial output too) and distribute it via the boundary-
-exchange BFS when flat-flowdir bit-identity is wanted; until then, the gap is documented and harmless
-(tree + sinks exact).
+seams). Caveats: mesas (flats with no low edge) — `resolve_flats` handles them.
+
+**Status — MOVE 1 DONE, MOVE 2 characterized.**
+- **Move 1 (DONE, commit `ee28a0d`):** the stitch now overlays `resolve_flats` on flat cells in both the
+  serial reference and the tiled build (`resolve_flat_flowdirs`). The tiled build is **bit-identical to
+  serial in tree AND per-cell flowdirs — 1521/1521 both** (fractals + all edge fixtures at every size,
+  including the flat plateaus that diverged 177 cells under the flood byproduct). Non-flat flowdirs and
+  the tree are untouched. *Caveat: move 1 runs `resolve_flats` on the FULL grid for the tiled side — it
+  proves correctness but is not yet footprint-bounded.*
+- **Move 2 (footprint-bounded distribution) — measured tractable.** Per-tile-independent `resolve_flats`
+  already agrees with the full-grid result everywhere except a bounded near-seam band; and a small
+  boundary **halo** closes it fast — on the 80-wide plateau, diff falls 120 (halo 0) → 44 (2) → 4 (4) →
+  **0 (halo 8)**. So the distributed form is per-tile `resolve_flats` + an **iterative seam-strip
+  exchange** (equivalently: grow the halo until the owned region stabilizes; ~propagation-depth rounds,
+  O(boundary) per round) — the same edge-strip machinery the MPI build already needs. It converges fast
+  because the geometry-deterministic routing is locally determined away from the seam. **Recommendation:**
+  implement move 2 as part of the MPI harness (its edge-strip exchange is the natural home); until then
+  the in-process harness uses the full-grid form (move 1), which is correct.
