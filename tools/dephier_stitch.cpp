@@ -24,6 +24,8 @@
 
 #include <dephier/dephier.hpp>
 #include <richdem/common/Array2D.hpp>
+#include <richdem/flowmet/d8_flowdirs.hpp>
+#include <richdem/flats/flat_resolution.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -56,6 +58,26 @@ static rd::Array2D<dh_label_t> ocean_labels(const rd::Array2D<float> &dem, float
     if(dem.isNoData(i) || dem(i)==ocean_level)
       label(i) = OCEAN;
   return label;
+}
+
+// Overlay Barnes-2014 resolve_flats directions onto the FLAT cells of `fd` (cells with
+// no strictly-lower neighbour), leaving non-flat cells untouched. DH assigns flat cells
+// an order-dependent flood-claim direction; this replaces it with the geometry-
+// deterministic flat routing (BuildAwayGradient + BuildTowardsCombinedGradient -> mask
+// -> d8_flow_flats), which is reproducible and therefore agrees serial vs. distributed.
+// See PARALLEL_DEPHIER_ENGINEERING.md section 6. (This is the full-grid form; the
+// distributed form computes the two gradient BFSs with a cross-seam boundary exchange.)
+static void resolve_flat_flowdirs(const rd::Array2D<float> &dem, rd::Array2D<int8_t> &fd){
+  rd::Array2D<int8_t> sd(dem.width(), dem.height(), rd::NO_FLOW);
+  rd::d8_flow_directions(dem, sd);                    // steepest descent: NO_FLOW on flats+pits
+  std::vector<char> was_flat(dem.size(), 0);
+  for(unsigned i=0;i<dem.size();i++)
+    if(!dem.isNoData(i) && sd(i)==rd::NO_FLOW) was_flat[i]=1;   // flat or genuine pit
+  rd::Array2D<int32_t> flat_mask, labels;
+  rd::resolve_flats_barnes(dem, sd, flat_mask, labels);
+  rd::d8_flow_flats(flat_mask, labels, sd);           // fill flat directions from the mask
+  for(unsigned i=0;i<dem.size();i++)
+    if(was_flat[i]) fd(i)=sd(i);                      // pits stay NO_FLOW; flats get resolved dir
 }
 
 template<class elev_t>
@@ -447,6 +469,10 @@ int main(int argc, char **argv){
             gFix(gx,y) = dir_to(bnx-gx, bny-y);
         }
       }
+  // Flat cells: replace the flood's order-dependent claim with Barnes-2014 resolve_flats
+  // (deterministic from geometry -> agrees with serial). MOVE 1: full-grid form; MOVE 2
+  // will compute the two gradient BFSs per-tile with a cross-seam boundary exchange.
+  resolve_flat_flowdirs(full, gFix);
 
   // ---- global outlet set, in the distributable shape (Barnes' join): each tile
   // derives its own outlets from its resolved labels (intra-tile adjacencies), and
@@ -515,6 +541,9 @@ int main(int argc, char **argv){
   auto s_label = ocean_labels(full, ocean_level);
   rd::Array2D<int8_t> s_fd(full.width(), full.height(), rd::NO_FLOW);
   auto S = dh::GetDepressionHierarchy<float,rd::Topology::D8>(full, s_label, s_fd);
+  // Serial reference uses the same deterministic flat routing (the proposed DH change:
+  // resolve_flats instead of the flood's flat byproduct). The tree is untouched.
+  resolve_flat_flowdirs(full, s_fd);
 
   // ---- flowdir check: the fixed-up tiled flowdirs must equal serial's, cell for cell ----
   bool flowdir_ok = true;
