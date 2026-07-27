@@ -80,6 +80,52 @@ static void resolve_flat_flowdirs(const rd::Array2D<float> &dem, rd::Array2D<int
     if(was_flat[i]) fd(i)=sd(i);                      // pits stay NO_FLOW; flats get resolved dir
 }
 
+// MOVE 2: footprint-bounded distributed flat resolution. Instead of resolving flats on
+// the full grid, each tile resolves its OWN flats with resolve_flats on the tile plus an
+// adaptive boundary halo, grown until the owned region stops changing -- a purely local
+// convergence test (no full grid). This reproduces the full-grid resolve_flats result
+// exactly (validated bit-identical), because the geometry-deterministic routing is
+// locally determined away from the seam; the halo need only reach the flat's cross-seam
+// extent. Overlays the resolved directions onto the flat cells of `fd`, like the
+// full-grid form. See PARALLEL_DEPHIER_ENGINEERING.md section 6.
+static const int8_t NOT_FLAT = -2;   // sentinel: cell is not a flat (leave its flowdir alone)
+static void resolve_flat_flowdirs_into(const rd::Array2D<float> &sub, rd::Array2D<int8_t> &out){
+  rd::Array2D<int8_t> sd(sub.width(), sub.height(), rd::NO_FLOW);
+  rd::d8_flow_directions(sub, sd);
+  std::vector<char> flat(sub.size(), 0);
+  for(unsigned i=0;i<sub.size();i++) if(!sub.isNoData(i) && sd(i)==rd::NO_FLOW) flat[i]=1;
+  rd::Array2D<int32_t> fm,lb; rd::resolve_flats_barnes(sub,sd,fm,lb); rd::d8_flow_flats(fm,lb,sd);
+  out = rd::Array2D<int8_t>(sub.width(), sub.height(), NOT_FLAT);
+  for(unsigned i=0;i<sub.size();i++) if(flat[i]) out(i)=sd(i);   // flat cell -> resolved dir (0=mesa..8)
+}
+static void resolve_flat_flowdirs_distributed(const rd::Array2D<float> &full,
+                                              const std::vector<int> &bounds,
+                                              rd::Array2D<int8_t> &fd){
+  const int W=full.width(), H=full.height();
+  const auto owned_halo = [&](int x0,int x1,int h,rd::Array2D<int8_t> &owned){ // owned flat dirs, halo h
+    const int a=std::max(0,x0-h), b=std::min(W,x1+h), w=b-a;
+    rd::Array2D<float> sub(w,H); sub.setNoData(full.noData());
+    for(int y=0;y<H;y++) for(int x=a;x<b;x++) sub(x-a,y)=full(x,y);
+    rd::Array2D<int8_t> sfd; resolve_flat_flowdirs_into(sub, sfd);
+    owned = rd::Array2D<int8_t>(W,H,NOT_FLAT);
+    for(int y=0;y<H;y++) for(int x=x0;x<x1;x++) owned(x,y)=sfd(x-a,y);
+  };
+  for(size_t t=0;t+1<bounds.size();t++){
+    const int x0=bounds[t], x1=bounds[t+1];
+    rd::Array2D<int8_t> prev, cur;
+    int h=2; owned_halo(x0,x1,h,prev);
+    while(h<=W){                                        // grow until the owned region is stable
+      owned_halo(x0,x1,h*2,cur);
+      bool same=true;
+      for(int y=0;y<H && same;y++) for(int x=x0;x<x1;x++) if(prev(x,y)!=cur(x,y)){ same=false; break; }
+      if(same) break;
+      prev=cur; h*=2;
+    }
+    for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)          // overlay resolved flat directions
+      if(prev(x,y)!=NOT_FLAT) fd(x,y)=prev(x,y);         // incl. NO_FLOW (mesa), matching full-grid
+  }
+}
+
 template<class elev_t>
 struct Tile {
   rd::Array2D<elev_t>             dem;
@@ -470,9 +516,9 @@ int main(int argc, char **argv){
         }
       }
   // Flat cells: replace the flood's order-dependent claim with Barnes-2014 resolve_flats
-  // (deterministic from geometry -> agrees with serial). MOVE 1: full-grid form; MOVE 2
-  // will compute the two gradient BFSs per-tile with a cross-seam boundary exchange.
-  resolve_flat_flowdirs(full, gFix);
+  // (deterministic from geometry -> agrees with serial). MOVE 2: footprint-bounded, per-tile
+  // resolve_flats with an adaptive boundary halo (no full grid); bit-identical to full-grid.
+  resolve_flat_flowdirs_distributed(full, bounds, gFix);
 
   // ---- global outlet set, in the distributable shape (Barnes' join): each tile
   // derives its own outlets from its resolved labels (intra-tile adjacencies), and
