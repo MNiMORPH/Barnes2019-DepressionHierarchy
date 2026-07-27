@@ -1,6 +1,15 @@
 // dh_flats -- Barnes-2014 flat-flowdir resolution, shared by the in-process stitch
 // (tools/dephier_stitch.cpp) and the distributed harness (tools/dephier_mpi.cpp). Extracted
 // verbatim from the stitch; no behaviour change. See PARALLEL_DEPHIER_ENGINEERING.md section 6.
+//
+// KEY EQUIVALENCE for the distributed flat resolution (ENH-1, ENHANCEMENTS.md): richdem's
+// resolve_flats_barnes labels flats with label_this, a flood-fill over equal-elevation
+// D8-neighbours -- so "same flat label" is IDENTICAL to "D8-adjacent AND same elevation." That
+// lets the whole flat_mask be rebuilt with NO global flat labeling, as three order-independent
+// relaxations over same-elevation adjacency (away-BFS from high edges, towards-BFS from low
+// edges, and a max-relaxation for flat_height), each of which distributes via a 1-column seam
+// exchange iterated to convergence. Proven bit-identical to resolve_flats_barnes by the
+// executable regression test tools/flat_mask_reconstruct_test.cpp (CTest flat_mask_reconstruct).
 #pragma once
 
 #include <richdem/common/Array2D.hpp>

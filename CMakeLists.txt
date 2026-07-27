@@ -31,6 +31,12 @@ if(USE_GDAL AND GDAL_FOUND)
   add_executable(dephier_flat_extent.exe tools/dephier_flat_extent.cpp)
   target_link_libraries(dephier_flat_extent.exe PRIVATE dephier richdem)
 
+  # Proves the label-free three-field reconstruction of Barnes-2014's flat_mask (the equivalence
+  # the ENH-1 distributed flat resolution is built on). See the file header + ENHANCEMENTS.md ENH-1.
+  add_executable(flat_mask_reconstruct_test.exe tools/flat_mask_reconstruct_test.cpp)
+  target_link_libraries(flat_mask_reconstruct_test.exe PRIVATE dephier richdem)
+  add_test(NAME flat_mask_reconstruct COMMAND flat_mask_reconstruct_test.exe)
+
   find_package(Threads REQUIRED)
   add_executable(comm_smoke.exe tools/comm_smoke.cpp)
   target_include_directories(comm_smoke.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
