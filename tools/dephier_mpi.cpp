@@ -21,6 +21,7 @@
 #include "tools/comm_thread.hpp"
 #include "dh_canonical.hpp"   // dhtest::canonicalize / invariants (shared with the stitch)
 #include "dh_collapse.hpp"    // CollapseSeamArtifacts            (shared with the stitch)
+#include "dh_flats.hpp"       // resolve_flat_flowdirs[_*]        (shared with the stitch)
 
 #include <dephier/dephier.hpp>
 #include <richdem/common/Array2D.hpp>
@@ -80,7 +81,8 @@ static rd::Array2D<dh_label_t> ocean_labels(const rd::Array2D<float> &dem, float
 struct EdgeStrip {
   std::vector<float>   elev;
   std::vector<uint8_t> ocean;
-  template<class Ar> void serialize(Ar &ar){ ar(elev, ocean); }
+  std::vector<uint8_t> nodata;   // distinguish a noData cell from an ocean-valued land neighbour
+  template<class Ar> void serialize(Ar &ar){ ar(elev, ocean, nodata); }
 };
 
 // Conduit resolution messages (eng-doc section 2), all keyed on a global (gx,gy) cell.
@@ -104,12 +106,13 @@ struct ORec    { dh_label_t depa, depb; float oelev; int64_t ocell;
                  template<class Ar> void serialize(Ar &ar){ ar(depa,depb,oelev,ocell); } };
 
 int main(int argc, char **argv){
-  if(argc!=4){
-    std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)>\n";
+  if(argc!=4 && argc!=5){
+    std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
     return -1;
   }
   const std::string in_name     = argv[1];
   const float       ocean_level = std::stod(argv[2]);
+  const int         halo_cap    = (argc==5) ? std::stoi(argv[4]) : std::numeric_limits<int>::max();
 
   rd::Array2D<float> full(in_name);
   const int W = full.width(), H = full.height();
@@ -163,6 +166,7 @@ int main(int argc, char **argv){
     rd::Array2D<int8_t>     fd;
     rd::Array2D<dh_label_t> glab;        // tile slice remapped into the GLOBAL namespace (pre-conduit)
     rd::Array2D<dh_label_t> glab_pc;     // same, after conduit resolution (BOUNDARY cells resolved)
+    rd::Array2D<int8_t>     gfix;        // tile flood flowdirs with the seam fix-up applied (pre-flats)
     int        nboundary = 0;
     int        ndep      = 0;            // local depressions, excl. ocean node 0 (deps.size()-1)
     dh_label_t offset    = 0;            // this tile's global label offset (prefix sum)
@@ -315,8 +319,8 @@ int main(int argc, char **argv){
     // Build this rank's edge strips and exchange with seam neighbours (non-blocking send
     // into the neighbour's inbox, then blocking recv -- no deadlock).
     const auto strip_of = [&](int lc){
-      EdgeStrip s; s.elev.resize(H); s.ocean.resize(H);
-      for(int y=0;y<H;y++){ s.elev[y]=dem(lc,y); s.ocean[y]= (dem.isNoData(lc,y)||dem(lc,y)==ocean_level); }
+      EdgeStrip s; s.elev.resize(H); s.ocean.resize(H); s.nodata.resize(H);
+      for(int y=0;y<H;y++){ s.elev[y]=dem(lc,y); s.ocean[y]=(dem.isNoData(lc,y)||dem(lc,y)==ocean_level); s.nodata[y]=dem.isNoData(lc,y); }
       return s;
     };
     if(r+1<ntiles) c::CommSend(strip_of(w-1), r+1, TAG_L2R);      // my right edge -> r+1's left halo
@@ -597,7 +601,50 @@ int main(int argc, char **argv){
       c::CommSend(dcount,0,TAG_MARG_C); c::CommSend(delev,0,TAG_MARG_E);
     }
 
+    // ---- per-cell flowdir seam fix-up (eng-doc section 6, non-flat crossings) ----
+    // A tile flood cannot point a cell across its own boundary, so a cell whose true drainage
+    // exits the tile is left NO_FLOW (a land seam seed) or points at the wrong ocean cell. Every
+    // other cell already matches serial. Restore serial's choice using ONLY the 1-column halo:
+    // a land seam seed points to its lowest cross-tile neighbour at/below its pit (highest-index
+    // tie); a sea-draining cell points to its highest-index adjacent ocean cell. O(boundary).
+    const auto isnodata=[&](int gx,int y)->bool{
+      if(gx>=x0 && gx<x1) return dem.isNoData(gx-x0,y);
+      if(gx==x0-1)        return haloL.nodata[y];
+      return haloR.nodata[y];
+    };
+    const auto gidx=[&](int gx,int y)->int64_t{ return (int64_t)y*W+gx; };
+    const auto dir_to=[&](int dx,int dy)->int8_t{ for(int n=1;n<=8;n++) if(rd::d8x[n]==dx && rd::d8y[n]==dy) return (int8_t)n; return rd::NO_FLOW; };
+    rd::Array2D<int8_t> gfix = fd;                               // start from the tile's flood flowdirs
+    for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++){
+      const int gx=x0+lx;
+      if(fd(lx,y)==rd::NO_FLOW && !dem.isNoData(lx,y) && label(lx,y)!=OCEAN){
+        const float fe=dem(lx,y); const int64_t fi=gidx(gx,y);
+        int bnx=0,bny=0; int64_t bi=-1; float be=std::numeric_limits<float>::infinity();
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+          if(!dx && !dy) continue;
+          const int nx=gx+dx, ny=y+dy;
+          if(nx<0||nx>=W||ny<0||ny>=H || isnodata(nx,ny)) continue;
+          if(!(nx<x0 || nx>=x1)) continue;                       // cross-seam neighbours only
+          const float e=elev(nx,ny); if(e>fe) continue;          // at or below the pit
+          const int64_t idx=gidx(nx,ny);
+          if(e<be || (e==be && idx>bi)){ be=e; bi=idx; bnx=nx; bny=ny; }
+        }
+        if(bi>=0 && (be<fe || bi>fi)) gfix(lx,y)=dir_to(bnx-gx, bny-y);
+      } else if(label(lx,y)==OCEAN && !dem.isNoData(lx,y)){       // sea-draining cell
+        int64_t bi=-1; int bnx=0,bny=0;
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+          if(!dx && !dy) continue;
+          const int nx=gx+dx, ny=y+dy;
+          if(nx<0||nx>=W||ny<0||ny>=H || !is_ocean(nx,ny)) continue;
+          const int64_t idx=gidx(nx,ny);
+          if(idx>bi){ bi=idx; bnx=nx; bny=ny; }
+        }
+        if(bi>=0 && (bnx<x0 || bnx>=x1)) gfix(lx,y)=dir_to(bnx-gx, bny-y);
+      }
+    }
+
     dist[r].label = std::move(label);                            // ranks write disjoint slots
+    dist[r].gfix  = std::move(gfix);
     dist[r].fd    = std::move(fd);
     dist[r].glab  = std::move(glab);
     dist[r].glab_pc = std::move(glab_pc);
@@ -681,10 +728,11 @@ int main(int argc, char **argv){
   // canonical signature (which includes per-node cell_count and dep_vol) to equal serial's. ----
   const int n_collapsed = CollapseSeamArtifacts(Gdist, full, bounds);
 
-  // serial ground truth (tree only; per-cell flowdirs are a later increment)
+  // serial ground truth (tree + per-cell flowdirs)
   auto s_label = ocean_labels(full, ocean_level);
   rd::Array2D<int8_t> s_fd(W, H, rd::NO_FLOW);
   auto S = dh::GetDepressionHierarchy<float,rd::Topology::D8>(full, s_label, s_fd);
+  resolve_flat_flowdirs(full, s_fd);                     // serial uses the same deterministic flat routing
 
   const std::string sig_dist = dhtest::canonicalize(Gdist);
   const std::string sig_serial = dhtest::canonicalize(S);
@@ -696,5 +744,26 @@ int main(int argc, char **argv){
            <<" nodes(serial="<<iv_s.n_nodes<<" dist="<<iv_d.n_nodes<<")"
            <<" total_dep_vol(serial="<<iv_s.total_dep_vol<<" dist="<<iv_d.total_dep_vol<<")\n";
 
-  return (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok) ? 0 : 1;
+  // ---- flowdir check: assemble the per-rank seam-fixed flowdirs, then apply the proven
+  // footprint-bounded flat pass (per-tile resolve_flats with an adaptive halo, option 3; its
+  // per-tile `full` reads model the DEM halo a real rank exchanges). Must equal serial's. ----
+  rd::Array2D<int8_t> gFix(W, H, rd::NO_FLOW);
+  for(int t=0;t<ntiles;t++){
+    const int x0=bounds[t], x1=bounds[t+1];
+    for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)
+      gFix(x,y) = dist[t].gfix(x-x0,y);
+  }
+  const int flat_capped = resolve_flat_flowdirs_distributed(full, bounds, gFix, halo_cap);
+  long fd_land=0, fd_diff=0;
+  for(unsigned i=0;i<full.size();i++){
+    if(full.isNoData(i)) continue;
+    fd_land++;
+    if(gFix(i)!=s_fd(i)) fd_diff++;
+  }
+  const bool flowdir_ok = (fd_diff==0);
+  std::cout<<(flowdir_ok ? "MPI-FLOWDIR-MATCH " : "MPI-FLOWDIR-DIFFER ")<<in_name
+           <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land
+           <<(flat_capped? " (flat tiles hit cap)":"")<<"\n";
+
+  return (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok && flowdir_ok) ? 0 : 1;
 }
