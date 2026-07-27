@@ -300,7 +300,9 @@ int main(int argc, char **argv){
   enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4,     // strip dirs; count->rank0; offset->rank r
          TAG_LW=5, TAG_EDGE=6, TAG_RESOLVED=7,                // conduit: Phase-1 recs / edge labels / results
          TAG_RES_LEFT=8, TAG_ODB_INTRA=9, TAG_ODB_EDGE=10,    // outlets: resolved edge strip / intra-db / edge-db
-         TAG_DEPREC=11 };                                     // depression records -> rank 0
+         TAG_DEPREC=11,                                       // depression records -> rank 0
+         TAG_TREE_E=12, TAG_TREE_P=13,                        // Phase D: broadcast tree out_elev / parent
+         TAG_MARG_C=14, TAG_MARG_E=15 };                      // Phase D: reduce marginal cell_count / total_elev
   std::map<OutKey,OutVal>         outlet_db_dist;             // rank 0's merged outlet DB (read in verify)
   dh::DepressionHierarchy<float>  Gdist;                      // rank 0's assembled global hierarchy (leaves)
   dh_label_t                      n_global_r0 = 0;            // rank 0's global depression count (incl. ocean)
@@ -547,6 +549,54 @@ int main(int argc, char **argv){
       c::CommSend(myrecs, 0, TAG_DEPREC);
     }
 
+    // ---- Phase C (rank 0, grid-free assembly) + distributed Phase D (marginal volumes) ----
+    // Rank 0 assembles the hierarchy from the gathered records + distributed outlet set, then
+    // broadcasts the light tree (out_elev + parent per node). Each rank computes the marginal
+    // (cell_count, total_elevation) contribution of ITS OWN cells -- the exact per-cell walk-up
+    // of CalculateMarginalVolumes, but tile-local -- and the O(#deps) partials reduce to rank 0,
+    // which applies them and runs the grid-free CalculateTotalVolumes. No rank but the owner
+    // reads any cell, so the last full-grid dependency (Phase D) is now distributed.
+    c::CommBarrier();
+    std::vector<float>      tree_out_elev;
+    std::vector<dh_label_t> tree_parent;
+    if(r==0){
+      std::vector<dh::Outlet<float>> outlets;
+      for(const auto &kv : outlet_db_dist){
+        dh::Outlet<float> o; o.depa=kv.first.first; o.depb=kv.first.second;
+        o.out_elev=kv.second.first; o.out_cell=kv.second.second; outlets.push_back(o);
+      }
+      dh::GetDepressionHierarchyPhaseC<float>(Gdist, outlets);   // grid-free; grows Gdist with meta nodes
+      const dh_label_t T = Gdist.size();
+      tree_out_elev.resize(T); tree_parent.resize(T);
+      for(dh_label_t i=0;i<T;i++){ tree_out_elev[i]=Gdist[i].out_elev; tree_parent[i]=Gdist[i].parent; }
+      for(int t=1;t<ntiles;t++){ c::CommSend(tree_out_elev,t,TAG_TREE_E); c::CommSend(tree_parent,t,TAG_TREE_P); }
+    } else {
+      c::CommRecv(tree_out_elev, 0, TAG_TREE_E);
+      c::CommRecv(tree_parent,   0, TAG_TREE_P);
+    }
+    const dh_label_t T = tree_out_elev.size();
+    std::vector<uint32_t> dcount(T, 0);
+    std::vector<double>   delev (T, 0.0);
+    for(int y=0;y<H;y++) for(int gx=x0;gx<x1;gx++){             // this rank's own cells only
+      if(dem.isNoData(gx-x0,y)) continue;
+      const float me = dem(gx-x0,y);
+      dh_label_t cl = glab_pc(gx-x0,y);
+      while(cl!=OCEAN && me > tree_out_elev[cl]) cl = tree_parent[cl];   // walk up to the depression it belongs to
+      if(cl==OCEAN) continue;
+      dcount[cl]++; delev[cl]+=me;
+    }
+    if(r==0){
+      for(int t=1;t<ntiles;t++){
+        std::vector<uint32_t> dc; std::vector<double> de;
+        c::CommRecv(dc,t,TAG_MARG_C); c::CommRecv(de,t,TAG_MARG_E);
+        for(dh_label_t i=0;i<T;i++){ dcount[i]+=dc[i]; delev[i]+=de[i]; }
+      }
+      for(dh_label_t i=0;i<T;i++){ Gdist[i].cell_count += dcount[i]; Gdist[i].total_elevation += delev[i]; }
+      dh::CalculateTotalVolumes<float>(Gdist);                 // grid-free rollup
+    } else {
+      c::CommSend(dcount,0,TAG_MARG_C); c::CommSend(delev,0,TAG_MARG_E);
+    }
+
     dist[r].label = std::move(label);                            // ranks write disjoint slots
     dist[r].fd    = std::move(fd);
     dist[r].glab  = std::move(glab);
@@ -625,18 +675,10 @@ int main(int argc, char **argv){
            <<" missing="<<pair_missing<<" extra="<<extra
            <<" elev_diff="<<elev_diff<<" cell_only_diff="<<cell_only<<"\n";
 
-  // ---- tree check: assemble the hierarchy on rank 0 (gathered records + distributed outlet
-  // set), run PhaseCD then collapse, and require the canonical signature to equal serial's.
-  // Phase C (assembly) is grid-free; Phase D (CalculateMarginalVolumes) reads the grid on rank 0
-  // -- NOT yet footprint-bounded (the next increment distributes the marginal volumes). ----
-  std::vector<dh::Outlet<float>> outlets;
-  for(const auto &kv : outlet_db_dist){
-    dh::Outlet<float> o;
-    o.depa=kv.first.first; o.depb=kv.first.second;
-    o.out_elev=kv.second.first; o.out_cell=kv.second.second;
-    outlets.push_back(o);
-  }
-  dh::GetDepressionHierarchyPhaseCD<float>(Gdist, outlets, full, gLabel_dist_pc);
+  // ---- tree check: rank_main already assembled the hierarchy (grid-free Phase C) and computed
+  // volumes with the DISTRIBUTED Phase D (each rank's own cells, reduced to rank 0) -- no rank
+  // read a foreign tile's interior. Here we only contract seam artifacts and require the
+  // canonical signature (which includes per-node cell_count and dep_vol) to equal serial's. ----
   const int n_collapsed = CollapseSeamArtifacts(Gdist, full, bounds);
 
   // serial ground truth (tree only; per-cell flowdirs are a later increment)
