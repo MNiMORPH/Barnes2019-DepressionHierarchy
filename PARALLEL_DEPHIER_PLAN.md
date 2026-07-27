@@ -293,12 +293,13 @@ Grounded in the actual structs:
   valued field** in each `Depression` record: `parent, odep, geolink, lchild, rchild, dep_label,
   ocean_linked[]` (`dephier.hpp:54–81`) and the boundary-strip labels.
 - **Cell indices become global.** `pit_cell` / `out_cell` are `flat_c_idx` (**`uint32_t`**,
-  `dephier.hpp:32`) local flat indices. For cross-tile meaning they must map to a global cell
-  identity — either `(tile_id, local_flat)` or a global flat index. **Headroom check:** global 30″ is
-  N = 933,120,000 < 2³² = 4.29e9, so a global `uint32` flat index *fits* — but only ~4.6× headroom;
-  document the ceiling and prefer `(tile,local)` pairs to avoid a silent overflow if resolution grows
-  (15″ would blow it). `dh_label_t` is also `uint32` (`dephier.hpp:31`) ⇒ ≤ 2³² depressions globally;
-  bound #depressions on real tiles (§8) to confirm headroom.
+  `dephier.hpp:32`) local flat indices. For cross-tile meaning they map to a **single global row-major
+  index `y*W + x` in `uint64`** (decision, Wickert — see PARALLEL_DEPHIER_ENGINEERING.md §2): a single
+  integer, *bit-identical to the serial build's own indexing* (the property that makes the distributed
+  result match serial cell-for-cell), and free of the `uint32` ceiling. **Headroom note:** a global
+  `uint32` flat index *fits* 30″ (N = 933,120,000 < 2³² = 4.29e9) but with only ~4.6× headroom (15″ would
+  blow it), so widen to `uint64`; `(tile,local)` pairs are a debugging view only. `dh_label_t` is also
+  `uint32` (`dephier.hpp:31`) ⇒ ≤ 2³² depressions globally; §8 measured ~8–16M globally, ample headroom.
 - **Reuse Phase C unchanged.** `DisjointDenseIntSet` already dynamically grows
   (`DisjointDenseIntSet.hpp:27`) and operates on labels; the global assembly instantiates it at
   `#global_depressions` and runs the loop at `dephier.hpp:640` verbatim. This is the payoff of the
@@ -475,6 +476,7 @@ way — a "does not fit" result is the finding that redirects the architecture.
    the differential oracle's on-edge fixtures decide whether the strip suffices or a 1-cell halo is
    warranted. Do you already know from the filling work whether this case bites in practice, or how
    you'd prefer to handle it for DH?
-5. **Global cell-index convention (§4).** `(tile,local)` pair vs. global `uint32` flat index — any
-   downstream (FSM) constraint that forces one?
+5. **Global cell-index convention (§4).** *Decided (Wickert): single global row-major index `y*W+x` in
+   `uint64`* — a single integer, bit-identical to serial's own indexing, no `uint32` ceiling. Open only
+   if a downstream (FSM) constraint forces `(tile,local)` pairs instead.
 ```

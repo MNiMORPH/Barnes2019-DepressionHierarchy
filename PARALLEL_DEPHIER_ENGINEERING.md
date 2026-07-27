@@ -85,9 +85,14 @@ byte-for-byte what the validated in-process stitch produces → the canonical si
 ### Message format
 Per BOUNDARY cell: `(uint64 global_cell_id, uint8 kind, uint64 payload)` where `payload` is the global
 label (`kind=RESOLVED`) or the entry global_cell_id (`kind=EXIT`). O(boundary) records per rank; a single
-`Gatherv` (v1) or nearest-neighbour exchange (v2). Global cell id: prefer `(tile_id, local_flat)` packed
-into a `uint64` over a global `uint32` flat index — the plan (§4) flags only ~4.6× headroom for a global
-`uint32` at 30″, and `(tile,local)` sidesteps the ceiling entirely (plan open-question §10.5).
+`Gatherv` (v1) or nearest-neighbour exchange (v2). **Global cell id (decision, Wickert): a single global
+row-major index `y*W + x`, widened to `uint64`.** Rationale: (a) a single integer is simplest in practice
+(indexing, sorting, hashing); (b) it is **bit-identical to the serial build's own cell indexing** —
+`GetDepressionHierarchy` already uses the global flat index, so keeping it is what lets the distributed
+result match serial cell-for-cell, as the in-process harness already does; (c) `uint64` removes the
+`uint32` ceiling the plan (§4) flags at 30″ (only ~4.6× headroom; `uint64` has ~2×10¹⁰). A
+`(tile_id, local_flat)` pair is a useful *debugging view* but not the on-wire identity — it would not
+match serial's indices, forfeiting (b). (Resolves plan open-question §10.5.)
 
 ---
 
