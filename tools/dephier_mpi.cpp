@@ -19,6 +19,8 @@
 //   (b) BOUNDARY-from-a-1-column-halo == BOUNDARY-from-the-full-grid (the local-first claim).
 
 #include "tools/comm_thread.hpp"
+#include "dh_canonical.hpp"   // dhtest::canonicalize / invariants (shared with the stitch)
+#include "dh_collapse.hpp"    // CollapseSeamArtifacts            (shared with the stitch)
 
 #include <dephier/dephier.hpp>
 #include <richdem/common/Array2D.hpp>
@@ -35,6 +37,18 @@
 namespace rd = richdem;
 namespace dh = richdem::dephier;
 namespace c  = commt;
+
+// Non-intrusive cereal serializer for a Depression, so leaf records can cross the shim to
+// rank 0 (eng-doc component 7). Found by ADL (Depression lives in richdem::dephier); does NOT
+// modify the published library. Carries every field so the gathered record is a faithful copy.
+namespace richdem { namespace dephier {
+template<class Ar, class E>
+void serialize(Ar &ar, Depression<E> &d){
+  ar(d.pit_cell, d.out_cell, d.parent, d.odep, d.geolink, d.pit_elev, d.out_elev,
+     d.lchild, d.rchild, d.ocean_parent, d.ocean_linked, d.dep_label,
+     d.cell_count, d.dep_vol, d.water_vol, d.total_elevation);
+}
+}}
 
 using dh::dh_label_t;
 using dh::OCEAN;
@@ -285,8 +299,11 @@ int main(int argc, char **argv){
   // ---- DISTRIBUTED: one thread-rank per tile, BOUNDARY from a 1-column halo ----
   enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4,     // strip dirs; count->rank0; offset->rank r
          TAG_LW=5, TAG_EDGE=6, TAG_RESOLVED=7,                // conduit: Phase-1 recs / edge labels / results
-         TAG_RES_LEFT=8, TAG_ODB_INTRA=9, TAG_ODB_EDGE=10 };  // outlets: resolved edge strip / intra-db / edge-db
-  std::map<OutKey,OutVal> outlet_db_dist;                     // rank 0's merged outlet DB (read in verify)
+         TAG_RES_LEFT=8, TAG_ODB_INTRA=9, TAG_ODB_EDGE=10,    // outlets: resolved edge strip / intra-db / edge-db
+         TAG_DEPREC=11 };                                     // depression records -> rank 0
+  std::map<OutKey,OutVal>         outlet_db_dist;             // rank 0's merged outlet DB (read in verify)
+  dh::DepressionHierarchy<float>  Gdist;                      // rank 0's assembled global hierarchy (leaves)
+  dh_label_t                      n_global_r0 = 0;            // rank 0's global depression count (incl. ocean)
   auto rank_main = [&](){
     const int r  = c::CommRank();
     const int x0 = bounds[r], x1 = bounds[r+1], w = x1-x0;
@@ -362,6 +379,7 @@ int main(int argc, char **argv){
         const dh_label_t this_off = off; off += counts[t];
         if(t==0) myoffset = this_off; else c::CommSend(this_off, t, TAG_OFFSET);
       }
+      n_global_r0 = off;                                          // 1 + total depressions across tiles
     } else {
       c::CommSend(mycount, 0, TAG_COUNT);
       c::CommRecv(myoffset, 0, TAG_OFFSET);
@@ -505,6 +523,30 @@ int main(int argc, char **argv){
       c::CommSend(edge_vec,  0, TAG_ODB_EDGE);
     }
 
+    // ---- gather depression records to rank 0 (eng-doc component 7) ----
+    // Each rank ships its leaf depressions with dep_label and pit_cell remapped to global.
+    // These O(#local depressions) records are the tree's raw material -- the one inherently
+    // global object (the meta-tree has no per-tile home), centralized on rank 0 for Phase C.
+    std::vector<dh::Depression<float>> myrecs;
+    for(dh_label_t k=1;k<deps.size();k++){
+      auto d = deps[k];
+      d.dep_label = gmap(k, myoffset);
+      if(d.pit_cell != dh::NO_VALUE){
+        int lx,ly; dem.iToxy(d.pit_cell, lx, ly);
+        d.pit_cell = (dh::flat_c_idx)ly*W + (x0+lx);              // tile-local -> global row-major index
+      }
+      myrecs.push_back(d);
+    }
+    if(r==0){
+      Gdist = dh::DepressionHierarchy<float>(n_global_r0);
+      Gdist[0] = deps[0]; Gdist[0].dep_label = 0;                 // the shared ocean node
+      const auto place=[&](const std::vector<dh::Depression<float>> &v){ for(const auto &d:v) Gdist[d.dep_label]=d; };
+      place(myrecs);
+      for(int t=1;t<ntiles;t++){ std::vector<dh::Depression<float>> v; c::CommRecv(v,t,TAG_DEPREC); place(v); }
+    } else {
+      c::CommSend(myrecs, 0, TAG_DEPREC);
+    }
+
     dist[r].label = std::move(label);                            // ranks write disjoint slots
     dist[r].fd    = std::move(fd);
     dist[r].glab  = std::move(glab);
@@ -583,5 +625,34 @@ int main(int argc, char **argv){
            <<" missing="<<pair_missing<<" extra="<<extra
            <<" elev_diff="<<elev_diff<<" cell_only_diff="<<cell_only<<"\n";
 
-  return (phaseab_ok && remap_ok && conduit_ok && outlet_ok) ? 0 : 1;
+  // ---- tree check: assemble the hierarchy on rank 0 (gathered records + distributed outlet
+  // set), run PhaseCD then collapse, and require the canonical signature to equal serial's.
+  // Phase C (assembly) is grid-free; Phase D (CalculateMarginalVolumes) reads the grid on rank 0
+  // -- NOT yet footprint-bounded (the next increment distributes the marginal volumes). ----
+  std::vector<dh::Outlet<float>> outlets;
+  for(const auto &kv : outlet_db_dist){
+    dh::Outlet<float> o;
+    o.depa=kv.first.first; o.depb=kv.first.second;
+    o.out_elev=kv.second.first; o.out_cell=kv.second.second;
+    outlets.push_back(o);
+  }
+  dh::GetDepressionHierarchyPhaseCD<float>(Gdist, outlets, full, gLabel_dist_pc);
+  const int n_collapsed = CollapseSeamArtifacts(Gdist, full, bounds);
+
+  // serial ground truth (tree only; per-cell flowdirs are a later increment)
+  auto s_label = ocean_labels(full, ocean_level);
+  rd::Array2D<int8_t> s_fd(W, H, rd::NO_FLOW);
+  auto S = dh::GetDepressionHierarchy<float,rd::Topology::D8>(full, s_label, s_fd);
+
+  const std::string sig_dist = dhtest::canonicalize(Gdist);
+  const std::string sig_serial = dhtest::canonicalize(S);
+  const auto iv_d = dhtest::invariants(Gdist);
+  const auto iv_s = dhtest::invariants(S);
+  const bool tree_ok = (sig_dist==sig_serial);
+  std::cout<<(tree_ok ? "MPI-TREE-MATCH " : "MPI-TREE-DIFFER ")<<in_name
+           <<" ranks="<<ntiles<<" collapsed="<<n_collapsed
+           <<" nodes(serial="<<iv_s.n_nodes<<" dist="<<iv_d.n_nodes<<")"
+           <<" total_dep_vol(serial="<<iv_s.total_dep_vol<<" dist="<<iv_d.total_dep_vol<<")\n";
+
+  return (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok) ? 0 : 1;
 }
