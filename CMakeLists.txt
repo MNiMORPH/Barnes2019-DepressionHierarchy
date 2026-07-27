@@ -31,6 +31,12 @@ if(USE_GDAL AND GDAL_FOUND)
   add_executable(dephier_flat_extent.exe tools/dephier_flat_extent.cpp)
   target_link_libraries(dephier_flat_extent.exe PRIVATE dephier richdem)
 
+  find_package(Threads REQUIRED)
+  add_executable(comm_smoke.exe tools/comm_smoke.cpp)
+  target_include_directories(comm_smoke.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(comm_smoke.exe PRIVATE richdem Threads::Threads)
+  add_test(NAME comm_thread_smoke COMMAND comm_smoke.exe)
+
   add_executable(dephier_selfcheck.exe tools/dephier_selfcheck.cpp)
   target_link_libraries(dephier_selfcheck.exe PRIVATE dephier richdem)
 
