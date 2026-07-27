@@ -620,17 +620,19 @@ void GetDepressionHierarchyPhaseAB(
 
 
 
-//Phase C+D of the build: assemble the depression hierarchy from the outlets and
-//then compute volumes. Grid-free except for the volume pass. In a distributed
-//build this runs once, globally, on the union of all tiles' outlets plus the
-//cross-tile outlets. Consumes (sorts) `outlets` and completes `depressions` in
-//place; `depressions` and `outlets` are the outputs of GetDepressionHierarchyPhaseAB.
+//Phase C of the build: assemble the depression hierarchy from the outlets. Fully
+//grid-free -- it reads only `depressions` and `outlets`, never the DEM or labels.
+//In a distributed build this runs once, globally, on the union of all tiles'
+//outlets plus the cross-tile outlets, on a single node (the tree is the one
+//inherently global object). Consumes (sorts) `outlets` and assembles the tree in
+//`depressions` in place; both are the outputs of GetDepressionHierarchyPhaseAB.
+//Volumes are a separate step (Phase D: CalculateMarginalVolumes then
+//CalculateTotalVolumes), split out so the grid-reading marginal pass can be
+//distributed while this assembly stays central. See GetDepressionHierarchyPhaseCD.
 template<class elev_t>
-void GetDepressionHierarchyPhaseCD(
+void GetDepressionHierarchyPhaseC(
   DepressionHierarchy<elev_t> &depressions,
-  std::vector<Outlet<elev_t>> &outlets,
-  const Array2D<elev_t>       &dem,
-  const Array2D<dh_label_t>   &label
+  std::vector<Outlet<elev_t>> &outlets
 ){
   ProgressBar progress;
   Timer timer_dephier;
@@ -788,6 +790,25 @@ void GetDepressionHierarchyPhaseCD(
 
   //The labels array has been modified in place. The depression hierarchy is
   //returned.
+
+}
+
+
+
+//Phase C+D of the build: assemble the hierarchy (Phase C) then compute volumes
+//(Phase D). Behaviour is identical to the pre-split fused implementation -- this is
+//the serial/centralized convenience wrapper. A distributed build instead calls
+//GetDepressionHierarchyPhaseC once on rank 0, distributes CalculateMarginalVolumes
+//across tiles (each rank over its own cells, the per-depression partials reduced),
+//then runs the grid-free CalculateTotalVolumes.
+template<class elev_t>
+void GetDepressionHierarchyPhaseCD(
+  DepressionHierarchy<elev_t> &depressions,
+  std::vector<Outlet<elev_t>> &outlets,
+  const Array2D<elev_t>       &dem,
+  const Array2D<dh_label_t>   &label
+){
+  GetDepressionHierarchyPhaseC<elev_t>(depressions, outlets);
 
   Timer timer_volumes;
   timer_volumes.start();
