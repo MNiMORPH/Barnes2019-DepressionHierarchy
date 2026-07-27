@@ -296,6 +296,21 @@ dimension (= worst-case halo) per contrasting tile: Sahara 95, Australia 111, Gr
   - **Escape hatch:** flat direction is physically arbitrary (same tree, same sinks), so a hard-capped
     halo giving *valid-but-not-serial-identical* routing on giant-lake interiors is an acceptable last
     resort — no hydrological effect.
-  **Decision:** ship the adaptive halo (done); size MPI tiles from this measurement; build the iterative-
-  exchange fallback with the MPI harness *iff* the chosen tile size leaves any flat uncovered. The
-  measurement (`dephier_flat_extent`) makes the tile-size/fallback call data-driven, as §8 did for Phase C.
+  **Decision (updated):** ship the adaptive halo **with a halo cap = option 3 (DONE)** so the problem is
+  *bounded for any input first*, then size MPI tiles from the measurement, then add option 2 (bit-identity
+  on the capped cases) as an optimization whenever — on the MPI machinery it shares (see the enhancement
+  in `ENHANCEMENTS.md`).
+
+**Option 3 — DONE (the backstop that bounds the problem).** `resolve_flat_flowdirs_distributed` takes a
+`halo_cap`: the halo grows until the owned region stabilizes (bit-identical) OR the cap, whichever first.
+A flat wider than the cap gets a capped halo → a **valid convergent flow field (same tree, same sinks)**
+that is not necessarily serial-identical in that flat's deep interior. This guarantees per-rank footprint
+`O(N/P) + O(cap·boundary)` for **any** input — nothing can blow up or hang. Demonstrated (`w80`, 80-wide
+plateau): as the cap tightens the flowdir degrades gracefully (`cap 8/4/2 → fd_diff 0/4/44`) while the
+**tree stays STITCH-MATCH at every cap** (the depression structure is never affected — only giant-flat
+interior routing). Default cap is unlimited (grows to the full grid = exact), so normal runs stay
+bit-identical (1521/1521); a production build sets the cap from `dephier_flat_extent`. CLI: optional 4th
+arg to `dephier_stitch`.
+
+With option 3 in place the flat problem is **bounded for all inputs**; option 2 (below / `ENHANCEMENTS.md`)
+is a bit-identity optimization to graft in later, not a prerequisite.
