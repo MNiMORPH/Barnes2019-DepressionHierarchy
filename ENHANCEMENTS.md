@@ -46,6 +46,24 @@ needs four cross-tile pieces — the same machinery the MPI build already provid
 4. **Boundary-aware mask + `d8_masked_FlowDir`** — a 1-cell mask halo suffices for the final local
    steepest-descent-on-mask (reuse richdem's `d8_flow_flats` / `d8_masked_FlowDir`).
 
+### VALIDATED SIMPLIFICATION (2026-07-27) — no union-find, three relaxations
+Reading `resolve_flats_barnes` closely, `label_this` floods equal-elevation D8-neighbours, so **"same flat
+label" ⟺ "D8-adjacent + same elevation."** The two gradient BFSs already only cross same-label cells, so the
+label check can be replaced by an **elevation check** — and `flat_height` (max away-dist per flat) becomes a
+**max-relaxation over same-elevation adjacency**, also label-free. So the whole thing is **three
+order-independent relaxations, no global flat labeling** (item 1's union-find is unnecessary):
+  1. `away_dist` — multi-source min-BFS from high edges, over {NO_FLOW, same-elevation} adjacency.
+  2. `towards_dist` — multi-source min-BFS from low edges, same adjacency.
+  3. `flat_height` — max-relaxation of `away_dist` over same-elevation adjacency.
+Then `mask = flat_height − away + 2·towards` and `d8_masked_FlowDir(mask)`, both purely local.
+Each relaxation distributes as: local compute → 1-column seam exchange → relax → iterate to global
+convergence (all-reduce of a "changed" flag); rounds ≈ flat diameter in tiles, O(boundary)/round.
+**Proven bit-identical to richdem's `flat_mask`** on a full-grid reconstruction test (scratch
+`flat_reconstruct.cpp`): `mask_diff=0` and label-free `flat_height diff=0` (302 flat cells, 65 high / 5 low
+edges). Correctness foundation done; remaining ENH-1 work is the distribution plumbing (per-rank
+relaxation + seam exchange + convergence loop, edge classification with the 1-column halo, integration into
+`resolve_flat_flowdirs`'s capped branch, validation against the full-grid form).
+
 ### Why deferred (not a step too far — right home)
 It is a distributed reimplementation of Barnes-2014 and reuses the MPI build's label-unification +
 reductions; building it standalone in the in-process column-split harness would duplicate that
