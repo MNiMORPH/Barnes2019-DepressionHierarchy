@@ -98,9 +98,18 @@ static void resolve_flat_flowdirs_into(const rd::Array2D<float> &sub, rd::Array2
   out = rd::Array2D<int8_t>(sub.width(), sub.height(), NOT_FLAT);
   for(unsigned i=0;i<sub.size();i++) if(flat[i]) out(i)=sd(i);   // flat cell -> resolved dir (0=mesa..8)
 }
-static void resolve_flat_flowdirs_distributed(const rd::Array2D<float> &full,
-                                              const std::vector<int> &bounds,
-                                              rd::Array2D<int8_t> &fd){
+// `halo_cap` bounds the halo (option 3, PARALLEL_DEPHIER_ENGINEERING.md section 6): the
+// halo grows until the owned region stabilizes (bit-identical) OR the cap, whichever comes
+// first. A flat WIDER than the cap is resolved with a capped halo -> a valid convergent
+// flow field (same tree, same sinks) but not necessarily serial-identical in that flat's
+// interior. This guarantees per-rank footprint O(N/P)+O(cap*boundary) for ANY input, so
+// nothing can break the build; the bit-identical option-2 exchange is a later optimization.
+// Returns the number of tiles whose halo hit the cap without converging. A cap >= grid
+// width is effectively unlimited (grows to the full grid = exact); that is the default.
+static int resolve_flat_flowdirs_distributed(const rd::Array2D<float> &full,
+                                             const std::vector<int> &bounds,
+                                             rd::Array2D<int8_t> &fd,
+                                             int halo_cap){
   const int W=full.width(), H=full.height();
   const auto owned_halo = [&](int x0,int x1,int h,rd::Array2D<int8_t> &owned){ // owned flat dirs, halo h
     const int a=std::max(0,x0-h), b=std::min(W,x1+h), w=b-a;
@@ -110,20 +119,26 @@ static void resolve_flat_flowdirs_distributed(const rd::Array2D<float> &full,
     owned = rd::Array2D<int8_t>(W,H,NOT_FLAT);
     for(int y=0;y<H;y++) for(int x=x0;x<x1;x++) owned(x,y)=sfd(x-a,y);
   };
+  int capped=0;
   for(size_t t=0;t+1<bounds.size();t++){
     const int x0=bounds[t], x1=bounds[t+1];
+    const int hmax=std::min(halo_cap, W);
     rd::Array2D<int8_t> prev, cur;
-    int h=2; owned_halo(x0,x1,h,prev);
-    while(h<=W){                                        // grow until the owned region is stable
-      owned_halo(x0,x1,h*2,cur);
+    int h=std::min(2,hmax); owned_halo(x0,x1,h,prev);
+    bool converged=false;
+    while(h<hmax){                                      // grow until owned region stable OR the cap
+      const int h2=std::min(h*2,hmax);
+      owned_halo(x0,x1,h2,cur);
       bool same=true;
       for(int y=0;y<H && same;y++) for(int x=x0;x<x1;x++) if(prev(x,y)!=cur(x,y)){ same=false; break; }
-      if(same) break;
-      prev=cur; h*=2;
+      prev=cur; h=h2;
+      if(same){ converged=true; break; }
     }
+    if(!converged) capped++;                            // a flat wider than the cap: valid, maybe not identical
     for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)          // overlay resolved flat directions
       if(prev(x,y)!=NOT_FLAT) fd(x,y)=prev(x,y);         // incl. NO_FLOW (mesa), matching full-grid
   }
+  return capped;
 }
 
 template<class elev_t>
@@ -289,12 +304,13 @@ static int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
 }
 
 int main(int argc, char **argv){
-  if(argc!=4){
-    std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)>\n";
+  if(argc!=4 && argc!=5){
+    std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
     return -1;
   }
   const std::string in_name     = argv[1];
   const float       ocean_level = std::stod(argv[2]);
+  const int         halo_cap    = (argc==5) ? std::stoi(argv[4]) : std::numeric_limits<int>::max();
 
   rd::Array2D<float> full(in_name);
 
@@ -518,7 +534,9 @@ int main(int argc, char **argv){
   // Flat cells: replace the flood's order-dependent claim with Barnes-2014 resolve_flats
   // (deterministic from geometry -> agrees with serial). MOVE 2: footprint-bounded, per-tile
   // resolve_flats with an adaptive boundary halo (no full grid); bit-identical to full-grid.
-  resolve_flat_flowdirs_distributed(full, bounds, gFix);
+  const int flat_capped = resolve_flat_flowdirs_distributed(full, bounds, gFix, halo_cap);
+  if(flat_capped) std::cerr<<"flat resolution: "<<flat_capped<<" tile(s) hit the halo cap ("<<halo_cap
+                           <<") -- valid but possibly not serial-identical in giant-flat interiors\n";
 
   // ---- global outlet set, in the distributable shape (Barnes' join): each tile
   // derives its own outlets from its resolved labels (intra-tile adjacencies), and
