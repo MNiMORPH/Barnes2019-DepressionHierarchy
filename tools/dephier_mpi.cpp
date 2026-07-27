@@ -79,6 +79,16 @@ struct LWRec  { int32_t gx,gy; uint8_t terminal; dh_label_t label; int32_t ex,ey
 struct CellLab{ int32_t gx,gy; dh_label_t label;
                 template<class Ar> void serialize(Ar &ar){ ar(gx,gy,label); } };
 
+// Outlet-set messages (eng-doc component 4).
+//   ResStrip -- a resolved edge column {global label, elevation, noData flag}, exchanged so a
+//               rank can run Barnes' HandleEdge across its seam without the neighbour's interior.
+//   ORec     -- one reduced outlet-DB entry: a depression pair + the outlet (higher-of-pair
+//               elevation and its cell). O(#local depression-adjacencies) per rank, not O(N/P).
+struct ResStrip{ std::vector<dh_label_t> label; std::vector<float> elev; std::vector<uint8_t> nodata;
+                 template<class Ar> void serialize(Ar &ar){ ar(label,elev,nodata); } };
+struct ORec    { dh_label_t depa, depb; float oelev; int64_t ocell;
+                 template<class Ar> void serialize(Ar &ar){ ar(depa,depb,oelev,ocell); } };
+
 int main(int argc, char **argv){
   if(argc!=4){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)>\n";
@@ -227,9 +237,56 @@ int main(int argc, char **argv){
     for(const auto &kv : res) gLabel_oracle_pc(kv.first.first, kv.first.second) = chase(kv.first.first, kv.first.second);
   }
 
+  // ORACLE outlet database (the stitch's outlet step, on the oracle post-conduit grid): one
+  // entry per depression pair, holding the outlet = the higher-elevation cell of the pair,
+  // keeping the LOWEST such max per pair (first-seen wins ties). Intra-tile adjacencies, then
+  // Barnes' HandleEdge across each seam. This is the object the distributed build must rebuild.
+  using OutKey = std::pair<dh_label_t,dh_label_t>;
+  using OutVal = std::pair<float,int64_t>;                 // (out_elev, out_cell)
+  // Tie-break (WATCH note, resolved): on EQUAL outlet elevation keep the LOWER out_cell. This
+  // reproduces the stitch's global-row-major "first-seen at lowest max" (first-seen in row-major
+  // at a given elevation IS the lowest-index cell) as an order-INDEPENDENT rule, so the
+  // distributed merge -- which visits pairs in rank order, not row-major -- picks the same cell.
+  // It does not change serial/stitch output (row-major already yields the lowest index).
+  const auto reduce = [](std::map<OutKey,OutVal> &db, dh_label_t la, dh_label_t lb,
+                         float ea, int64_t ca, float eb, int64_t cb){
+    if(la==lb) return;
+    const float oe = (ea>=eb)? ea : eb; const int64_t oc = (ea>=eb)? ca : cb;
+    const auto key = std::minmax(la,lb);
+    const auto it = db.find({key.first,key.second});
+    if(it==db.end() || oe < it->second.first || (oe==it->second.first && oc < it->second.second))
+      db[{key.first,key.second}] = {oe,oc};
+  };
+  std::map<OutKey,OutVal> odb;
+  for(int y=0;y<H;y++)
+    for(int x=0;x<W;x++){
+      if(full.isNoData(x,y)) continue;
+      for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+        if(!dx && !dy) continue;
+        const int nx=x+dx, ny=y+dy;
+        if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
+        if(tile_of(nx)!=tile_of(x)) continue;             // cross-seam handled by HandleEdge
+        reduce(odb, gLabel_oracle_pc(x,y), gLabel_oracle_pc(nx,ny),
+               full(x,y), full.xyToI(x,y), full(nx,ny), full.xyToI(nx,ny));
+      }
+    }
+  for(size_t b=1;b+1<bounds.size();b++){
+    const int cA=bounds[b]-1, cB=bounds[b];
+    for(int y=0;y<H;y++){
+      if(full.isNoData(cA,y)) continue;
+      for(int ny=y-1;ny<=y+1;ny++){
+        if(ny<0 || ny>=H || full.isNoData(cB,ny)) continue;
+        reduce(odb, gLabel_oracle_pc(cA,y), gLabel_oracle_pc(cB,ny),
+               full(cA,y), full.xyToI(cA,y), full(cB,ny), full.xyToI(cB,ny));
+      }
+    }
+  }
+
   // ---- DISTRIBUTED: one thread-rank per tile, BOUNDARY from a 1-column halo ----
   enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4,     // strip dirs; count->rank0; offset->rank r
-         TAG_LW=5, TAG_EDGE=6, TAG_RESOLVED=7 };              // conduit: Phase-1 recs / edge labels / results
+         TAG_LW=5, TAG_EDGE=6, TAG_RESOLVED=7,                // conduit: Phase-1 recs / edge labels / results
+         TAG_RES_LEFT=8, TAG_ODB_INTRA=9, TAG_ODB_EDGE=10 };  // outlets: resolved edge strip / intra-db / edge-db
+  std::map<OutKey,OutVal> outlet_db_dist;                     // rank 0's merged outlet DB (read in verify)
   auto rank_main = [&](){
     const int r  = c::CommRank();
     const int x0 = bounds[r], x1 = bounds[r+1], w = x1-x0;
@@ -386,6 +443,68 @@ int main(int argc, char **argv){
     rd::Array2D<dh_label_t> glab_pc = glab;
     for(const auto &c2 : myresolved) glab_pc(c2.gx-x0, c2.gy) = c2.label;
 
+    // ---- distributed outlet set (eng-doc component 4) ----
+    c::CommBarrier();                                            // separate the conduit gather from this one
+    // Intra-tile outlet DB: adjacencies whose neighbour is in THIS tile (local: own columns only).
+    std::map<OutKey,OutVal> myintra;
+    for(int y=0;y<H;y++) for(int gx=x0;gx<x1;gx++){
+      if(dem.isNoData(gx-x0,y)) continue;
+      for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+        if(!dx && !dy) continue;
+        const int nx=gx+dx, ny=y+dy;
+        if(nx<x0||nx>=x1||ny<0||ny>=H) continue;                // same-tile neighbours only
+        if(dem.isNoData(nx-x0,ny)) continue;
+        reduce(myintra, glab_pc(gx-x0,y), glab_pc(nx-x0,ny),
+               dem(gx-x0,y), (int64_t)y*W+gx, dem(nx-x0,ny), (int64_t)ny*W+nx);
+      }
+    }
+    // HandleEdge across seams: send my LEFT edge column (resolved) to r-1; each rank runs the
+    // match for its RIGHT seam using the neighbour's LEFT-edge strip. O(H) per seam.
+    if(r>0){
+      ResStrip s; s.label.resize(H); s.elev.resize(H); s.nodata.resize(H);
+      for(int y=0;y<H;y++){ s.label[y]=glab_pc(0,y); s.elev[y]=dem(0,y); s.nodata[y]=dem.isNoData(0,y); }
+      c::CommSend(s, r-1, TAG_RES_LEFT);
+    }
+    std::map<OutKey,OutVal> myedgedb;
+    if(r<ntiles-1){
+      ResStrip nbr; c::CommRecv(nbr, r+1, TAG_RES_LEFT);
+      const int cA=x1-1, cB=bounds[r+1];                        // own right edge / neighbour left edge (x1)
+      for(int y=0;y<H;y++){
+        if(dem.isNoData(cA-x0,y)) continue;
+        for(int ny=y-1;ny<=y+1;ny++){
+          if(ny<0||ny>=H||nbr.nodata[ny]) continue;
+          reduce(myedgedb, glab_pc(cA-x0,y), nbr.label[ny],
+                 dem(cA-x0,y), (int64_t)y*W+cA, nbr.elev[ny], (int64_t)ny*W+cB);
+        }
+      }
+    }
+    // Gather per-rank DBs to rank 0; merge all intra (rank order), then all edge (rank order),
+    // matching the stitch's "all intra-tile, then all seams" outlet order.
+    const auto to_vec=[&](const std::map<OutKey,OutVal> &db){
+      std::vector<ORec> v; v.reserve(db.size());
+      for(const auto &kv : db) v.push_back({ kv.first.first, kv.first.second, kv.second.first, kv.second.second });
+      return v;
+    };
+    std::vector<ORec> intra_vec=to_vec(myintra), edge_vec=to_vec(myedgedb);
+    if(r==0){
+      std::vector<std::vector<ORec>> intra_all(ntiles), edge_all(ntiles);
+      intra_all[0]=intra_vec; edge_all[0]=edge_vec;
+      for(int t=1;t<ntiles;t++){ c::CommRecv(intra_all[t],t,TAG_ODB_INTRA); c::CommRecv(edge_all[t],t,TAG_ODB_EDGE); }
+      std::map<OutKey,OutVal> gdb;
+      const auto mrg=[&](const ORec &rc){                       // same tie-break as reduce(): lower cell wins
+        const auto it=gdb.find({rc.depa,rc.depb});
+        if(it==gdb.end() || rc.oelev < it->second.first
+                         || (rc.oelev==it->second.first && rc.ocell < it->second.second))
+          gdb[{rc.depa,rc.depb}]={rc.oelev,rc.ocell};
+      };
+      for(int t=0;t<ntiles;t++) for(const auto &rc:intra_all[t]) mrg(rc);
+      for(int t=0;t<ntiles;t++) for(const auto &rc:edge_all[t]) mrg(rc);
+      outlet_db_dist = std::move(gdb);
+    } else {
+      c::CommSend(intra_vec, 0, TAG_ODB_INTRA);
+      c::CommSend(edge_vec,  0, TAG_ODB_EDGE);
+    }
+
     dist[r].label = std::move(label);                            // ranks write disjoint slots
     dist[r].fd    = std::move(fd);
     dist[r].glab  = std::move(glab);
@@ -447,5 +566,22 @@ int main(int argc, char **argv){
            <<" ranks="<<ntiles<<" conduit_diff="<<cdiff<<"/"<<cells
            <<" boundary_resolved="<<nboundary<<"\n";
 
-  return (phaseab_ok && remap_ok && conduit_ok) ? 0 : 1;
+  // ---- outlet check: the merged distributed outlet DB must equal the stitch's, pair for pair.
+  // Break out cell-only diffs (same pair, same outlet elevation, different equal-elev cell) --
+  // those are order-dependent tie choices that may or may not perturb the final tree. ----
+  long pair_missing=0, elev_diff=0, cell_only=0, extra=0;
+  for(const auto &kv : odb){
+    const auto it = outlet_db_dist.find(kv.first);
+    if(it==outlet_db_dist.end()){ pair_missing++; continue; }
+    if(it->second.first != kv.second.first)       elev_diff++;
+    else if(it->second.second != kv.second.second) cell_only++;
+  }
+  for(const auto &kv : outlet_db_dist) if(!odb.count(kv.first)) extra++;
+  const bool outlet_ok = (pair_missing==0 && elev_diff==0 && cell_only==0 && extra==0);
+  std::cout<<(outlet_ok ? "MPI-OUTLET-MATCH " : "MPI-OUTLET-DIFFER ")<<in_name
+           <<" ranks="<<ntiles<<" pairs="<<odb.size()
+           <<" missing="<<pair_missing<<" extra="<<extra
+           <<" elev_diff="<<elev_diff<<" cell_only_diff="<<cell_only<<"\n";
+
+  return (phaseab_ok && remap_ok && conduit_ok && outlet_ok) ? 0 : 1;
 }
