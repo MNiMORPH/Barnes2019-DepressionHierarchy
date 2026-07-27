@@ -28,6 +28,9 @@ if(USE_GDAL AND GDAL_FOUND)
   add_executable(dephier_stats.exe tools/dephier_stats.cpp)
   target_link_libraries(dephier_stats.exe PRIVATE dephier richdem)
 
+  add_executable(dephier_flat_extent.exe tools/dephier_flat_extent.cpp)
+  target_link_libraries(dephier_flat_extent.exe PRIVATE dephier richdem)
+
   add_executable(dephier_selfcheck.exe tools/dephier_selfcheck.cpp)
   target_link_libraries(dephier_selfcheck.exe PRIVATE dephier richdem)
 
