@@ -107,15 +107,18 @@ int main(){
   }
   // Also check the end-to-end flowdir producer: resolve_flat_flowdirs_option2 (the label-free
   // relaxation form used by ENH-1) must equal the reference resolve_flat_flowdirs, flowdir for flowdir.
-  rd::Array2D<int8_t> fa=sd, fb=sd;
+  rd::Array2D<int8_t> fa=sd, fb=sd, fc=sd;
   resolve_flat_flowdirs(dem, fa);            // richdem-based reference (full grid)
-  resolve_flat_flowdirs_option2(dem, fb);    // ENH-1 relaxation reconstruction
-  long fd_diff=0; for(int i=0;i<(int)fa.size();i++) if(fa(i)!=fb(i)) fd_diff++;
+  resolve_flat_flowdirs_option2(dem, fb);    // ENH-1 whole-grid relaxation
+  const std::vector<int> bnds{0, W/3, 2*W/3, W};
+  resolve_flat_flowdirs_option2_tiled(dem, bnds, fc);   // ENH-1 per-tile + seam exchange (driver B)
+  long fd_diff=0, tiled_diff=0;
+  for(int i=0;i<(int)fa.size();i++){ if(fa(i)!=fb(i)) fd_diff++; if(fb(i)!=fc(i)) tiled_diff++; }
 
-  const bool ok = (mask_diff==0 && fh_diff==0 && fd_diff==0);
+  const bool ok = (mask_diff==0 && fh_diff==0 && fd_diff==0 && tiled_diff==0);
   std::cout<<(ok?"FLAT-RECONSTRUCT-OK":"FLAT-RECONSTRUCT-DIFFER")
            <<" flat_cells="<<flats<<" high_edges="<<high_edges.size()<<" low_edges="<<low_edges.size()
            <<" mask_diff="<<mask_diff<<" label_free_flat_height_diff="<<fh_diff
-           <<" option2_flowdir_diff="<<fd_diff<<"\n";
+           <<" option2_flowdir_diff="<<fd_diff<<" tiled_vs_option2_diff="<<tiled_diff<<"\n";
   return ok?0:1;
 }

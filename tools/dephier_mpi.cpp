@@ -801,17 +801,17 @@ int main(int argc, char **argv){
            <<" total_dep_vol(serial="<<iv_s.total_dep_vol<<" dist="<<iv_d.total_dep_vol<<")\n";
 
   // ---- flowdir check: assemble the per-rank seam-fixed flowdirs, then resolve flats with ENH-1's
-  // label-free relaxation (resolve_flat_flowdirs_option2): three same-elevation relaxations that
-  // each distribute as a 1-column seam exchange per round -> O(boundary), no flat-extent halo (it
-  // supersedes option 3). Whole-grid here (in-process); each round is one MPI seam round. Must
-  // equal serial's flat routing, cell for cell. ----
+  // label-free relaxation in its PER-TILE form (resolve_flat_flowdirs_option2_tiled): each of the
+  // three relaxations runs tile-by-tile with a 1-column seam exchange per round (a value crosses <=1
+  // seam/round; flat_seam_rounds ~ flat diameter in tiles), O(boundary)/round, no flat-extent halo --
+  // it supersedes option 3. No tile reads another tile's interior. Must equal serial, cell for cell. ----
   rd::Array2D<int8_t> gFix(W, H, rd::NO_FLOW);
   for(int t=0;t<ntiles;t++){
     const int x0=bounds[t], x1=bounds[t+1];
     for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)
       gFix(x,y) = dist[t].gfix(x-x0,y);
   }
-  resolve_flat_flowdirs_option2(full, gFix);   // ENH-1: label-free relaxation, O(boundary), no halo cap
+  const int flat_rounds = resolve_flat_flowdirs_option2_tiled(full, bounds, gFix);  // ENH-1 per-tile relaxation
   (void)halo_cap;                              // option 2 supersedes option 3's cap; arg kept for compat
   long fd_land=0, fd_diff=0;
   for(unsigned i=0;i<full.size();i++){
@@ -821,7 +821,8 @@ int main(int argc, char **argv){
   }
   const bool flowdir_ok = (fd_diff==0);
   std::cout<<(flowdir_ok ? "MPI-FLOWDIR-MATCH " : "MPI-FLOWDIR-DIFFER ")<<in_name
-           <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land<<"\n";
+           <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land
+           <<" flat_seam_rounds="<<flat_rounds<<"\n";
 
   const int rc = (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok && flowdir_ok) ? 0 : 1;
 #ifdef DH_USE_MPI

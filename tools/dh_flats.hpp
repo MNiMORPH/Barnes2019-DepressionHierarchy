@@ -42,75 +42,112 @@ inline void resolve_flat_flowdirs(const rd::Array2D<float> &dem, rd::Array2D<int
     if(was_flat[i]) fd(i)=sd(i);                      // pits stay NO_FLOW; flats get resolved dir
 }
 
-// ENH-1 / "option 2": label-free reconstruction of Barnes-2014 flat flowdirs as three
-// order-independent RELAXATIONS over same-elevation adjacency (see the equivalence note at the top
-// of this file; proven bit-identical by tools/flat_mask_reconstruct_test.cpp). Each relaxation is a
-// pure D8 stencil, so it distributes as a 1-column seam exchange per round -- per-rank memory
-// O(N/P)+O(boundary), rounds ~ flat diameter, NOT bounded by flat extent (that is the whole point
-// of ENH-1 vs. the option-3 halo). This is the global (whole-grid) form used to validate bit-
-// identity; the distributed harness runs the identical relaxations per tile with seam exchange.
-// Overlays resolved directions onto the flat cells of `fd`, exactly like resolve_flat_flowdirs.
-inline void resolve_flat_flowdirs_option2(const rd::Array2D<float> &dem, rd::Array2D<int8_t> &fd){
+// ---- ENH-1 / "option 2": label-free flat resolution as three order-independent RELAXATIONS over
+// same-elevation adjacency (see the equivalence note at the top of this file; proven bit-identical by
+// tools/flat_mask_reconstruct_test.cpp). Setup (`flat_seed`) and finish (`flat_finish`: mask ->
+// masked flowdir) are shared; only the relaxation SCHEDULING differs between the whole-grid form and
+// the per-tile + 1-column-seam-exchange form. Both overlay onto the flat cells of `fd` exactly like
+// resolve_flat_flowdirs.
+inline bool flat_at(const rd::Array2D<float>&dem, const rd::Array2D<int8_t>&sd, int x,int y){
+  return sd.inGrid(x,y) && !dem.isNoData(x,y) && sd(x,y)==rd::NO_FLOW;   // flat/pit cell (NO_FLOW)
+}
+// Fill sd (d8) and the relaxation seeds. HIGH edge (flat cell touching higher terrain) -> away=1;
+// LOW edge (non-flat cell touching a same-elevation flat) -> tw=1; everything else INF.
+inline void flat_seed(const rd::Array2D<float>&dem, rd::Array2D<int8_t>&sd,
+                      rd::Array2D<int32_t>&away, rd::Array2D<int32_t>&tw, int32_t INF){
   const int W=dem.width(), H=dem.height();
-  const int32_t INF = 1<<28;
-  rd::Array2D<int8_t> sd(W,H,rd::NO_FLOW);
-  rd::d8_flow_directions(dem, sd);                       // NO_FLOW on flats + genuine pits
-  const auto FLAT=[&](int x,int y){ return sd.inGrid(x,y) && !dem.isNoData(x,y) && sd(x,y)==rd::NO_FLOW; };
-
-  // Seeds. HIGH edge: a flat cell adjacent to higher terrain -> away=1. TOWARDS source (low edge):
-  // a NON-flat cell adjacent to a same-elevation flat cell -> tw=1 (its flat neighbours become 2).
-  rd::Array2D<int32_t> away(W,H,INF), tw(W,H,INF), fh(W,H,0);
+  rd::d8_flow_directions(dem, sd);
+  away.setAll(INF); tw.setAll(INF);
   for(int y=0;y<H;y++) for(int x=0;x<W;x++){
     if(dem.isNoData(x,y)) continue;
     for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n]; if(!dem.inGrid(nx,ny)||dem.isNoData(nx,ny)) continue;
-      if(FLAT(x,y) && dem(nx,ny)>dem(x,y)) away(x,y)=1;                       // high edge
-      if(!FLAT(x,y) && FLAT(nx,ny) && dem(nx,ny)==dem(x,y)) tw(x,y)=1;        // low edge (towards source)
+      if(flat_at(dem,sd,x,y)  && dem(nx,ny)>dem(x,y))                             away(x,y)=1;
+      if(!flat_at(dem,sd,x,y) && flat_at(dem,sd,nx,ny) && dem(nx,ny)==dem(x,y))   tw(x,y)=1;
     }
   }
-  // Relaxations (order-independent min/max fixed points). A whole-grid sweep = one distributed
-  // seam-exchange round; iterate until nothing changes. away/tw relax only FLAT cells (NO_FLOW);
-  // fh is a max over the equal-elevation blob (same-elevation adjacency, includes low edges).
-  const auto relax_min=[&](rd::Array2D<int32_t> &d){
-    for(bool go=true; go; ){ go=false;
-      for(int y=0;y<H;y++) for(int x=0;x<W;x++){ if(!FLAT(x,y)) continue;
-        for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
-          if(dem.inGrid(nx,ny) && !dem.isNoData(nx,ny) && dem(nx,ny)==dem(x,y) && d(nx,ny)+1<d(x,y)){ d(x,y)=d(nx,ny)+1; go=true; } } } }
-  };
-  relax_min(away);
-  relax_min(tw);
-  // flat_height = max ASSIGNED away over the equal-elevation blob (cells with no away contribute
-  // nothing -> init 0, not INF); max-relaxation over same-elevation adjacency.
-  for(int y=0;y<H;y++) for(int x=0;x<W;x++) fh(x,y) = (FLAT(x,y) && away(x,y)<INF)? away(x,y) : 0;
-  for(bool go=true; go; ){ go=false;
-    for(int y=0;y<H;y++) for(int x=0;x<W;x++){ if(dem.isNoData(x,y)) continue;
-      for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
-        if(dem.inGrid(nx,ny) && !dem.isNoData(nx,ny) && dem(nx,ny)==dem(x,y) && fh(nx,ny)>fh(x,y)){ fh(x,y)=fh(nx,ny); go=true; } } } }
-
-  // Mask (Barnes-2014). Only flats WITH an outlet (reachable from a low edge, tw<INF) are resolved;
-  // outlet-less flats (pits/depressions, handled by the DH) keep mask=INF and stay NO_FLOW.
-  //   * flat cell with an away gradient: flat_height - away + 2*towards.
-  //   * flat cell with NO away (a mesa: outlet but no high edge): 2*towards  (BuildTowards else-branch).
-  //   * low edge (non-flat source): 2*towards (=2) -- read by the masked-flowdir step so flow exits.
+}
+// Mask (Barnes-2014) then masked steepest-descent, overlaid onto EVERY flat cell (fd(was_flat)=dir,
+// NO_FLOW where border/unresolved), so the result is independent of what `fd` held on flats before.
+inline void flat_finish(const rd::Array2D<float>&dem, const rd::Array2D<int8_t>&sd,
+                        const rd::Array2D<int32_t>&away, const rd::Array2D<int32_t>&tw,
+                        const rd::Array2D<int32_t>&fh, rd::Array2D<int8_t>&fd, int32_t INF){
+  const int W=dem.width(), H=dem.height();
   rd::Array2D<int32_t> mask(W,H,INF);
   for(int y=0;y<H;y++) for(int x=0;x<W;x++){
-    if(FLAT(x,y) && tw(x,y)<INF)      mask(x,y) = (away(x,y)<INF)? (fh(x,y)-away(x,y)+2*tw(x,y)) : (2*tw(x,y));
-    else if(!FLAT(x,y) && tw(x,y)<INF) mask(x,y) = 2*tw(x,y);
+    const bool f=flat_at(dem,sd,x,y);
+    if(f && tw(x,y)<INF)       mask(x,y) = (away(x,y)<INF)? (fh(x,y)-away(x,y)+2*tw(x,y)) : (2*tw(x,y));
+    else if(!f && tw(x,y)<INF) mask(x,y) = 2*tw(x,y);                             // low edge (=2)
   }
-  // Final direction: steepest descent on the mask among same-elevation neighbours (== same-label),
-  // with richdem's d8_masked_FlowDir tie-break (prefer the diagonal on an equal-mask tie). Interior
-  // cells only, matching d8_flow_flats. Then overlay onto EVERY flat cell exactly as
-  // resolve_flat_flowdirs does (fd(was_flat)=sd(was_flat)): border and unresolved flats become
-  // NO_FLOW, so the overlay is independent of whatever `fd` held on flat cells beforehand.
   rd::Array2D<int8_t> out(W,H,rd::NO_FLOW);
-  for(int y=1;y<H-1;y++) for(int x=1;x<W-1;x++){
-    if(!FLAT(x,y) || mask(x,y)>=INF) continue;
+  for(int y=1;y<H-1;y++) for(int x=1;x<W-1;x++){                                  // interior, like d8_flow_flats
+    if(!flat_at(dem,sd,x,y) || mask(x,y)>=INF) continue;
     int best=mask(x,y), dir=rd::NO_FLOW;
     for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
-      if(dem(nx,ny)!=dem(x,y) || mask(nx,ny)>=INF) continue;               // same-elevation (== same label)
+      if(dem(nx,ny)!=dem(x,y) || mask(nx,ny)>=INF) continue;                      // same-elevation (== same label)
       if(mask(nx,ny)<best || (mask(nx,ny)==best && dir>0 && dir%2==0 && n%2==1)){ best=mask(nx,ny); dir=n; } }
     out(x,y)=(int8_t)dir;
   }
-  for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(FLAT(x,y)) fd(x,y)=out(x,y);   // overlay all flat cells
+  for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(flat_at(dem,sd,x,y)) fd(x,y)=out(x,y);
+}
+
+// WHOLE-GRID form: each relaxation sweeps the whole grid to its fixed point (the distributed algorithm
+// scheduled globally). Used to validate bit-identity and as the in-process harness flat pass.
+inline void resolve_flat_flowdirs_option2(const rd::Array2D<float>&dem, rd::Array2D<int8_t>&fd){
+  const int W=dem.width(), H=dem.height(); const int32_t INF=1<<28;
+  rd::Array2D<int8_t> sd(W,H,rd::NO_FLOW);
+  rd::Array2D<int32_t> away(W,H,INF), tw(W,H,INF), fh(W,H,0);
+  flat_seed(dem,sd,away,tw,INF);
+  const auto rmin=[&](rd::Array2D<int32_t>&d){ for(bool go=true; go; ){ go=false;
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++){ if(!flat_at(dem,sd,x,y)) continue;
+      for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
+        if(dem.inGrid(nx,ny)&&!dem.isNoData(nx,ny)&&dem(nx,ny)==dem(x,y)&&d(nx,ny)+1<d(x,y)){ d(x,y)=d(nx,ny)+1; go=true; } } } } };
+  rmin(away); rmin(tw);
+  for(int y=0;y<H;y++) for(int x=0;x<W;x++) fh(x,y)=(flat_at(dem,sd,x,y)&&away(x,y)<INF)?away(x,y):0;
+  for(bool go=true; go; ){ go=false;
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++){ if(dem.isNoData(x,y)) continue;
+      for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
+        if(dem.inGrid(nx,ny)&&!dem.isNoData(nx,ny)&&dem(nx,ny)==dem(x,y)&&fh(nx,ny)>fh(x,y)){ fh(x,y)=fh(nx,ny); go=true; } } } }
+  flat_finish(dem,sd,away,tw,fh,fd,INF);
+}
+
+// PER-TILE + 1-column-seam-exchange form (ENH-1's genuine distributed realization). Each ROUND every
+// tile relaxes its OWNED columns [x0,x1) to local convergence, reading cross-seam neighbours from the
+// PREVIOUS round's snapshot -- so a value crosses at most one seam per round; rounds ~ flat diameter
+// in tiles, and only O(boundary) (the seam columns) crosses per round. No tile reads another tile's
+// interior. Bit-identical to the whole-grid form (same monotone min/max fixed point). Returns the
+// total relaxation rounds (a diagnostic: the seam-exchange count). `bounds` are the tile column splits.
+inline int resolve_flat_flowdirs_option2_tiled(const rd::Array2D<float>&dem, const std::vector<int>&bounds,
+                                               rd::Array2D<int8_t>&fd){
+  const int W=dem.width(), H=dem.height(); const int32_t INF=1<<28; const int nt=(int)bounds.size()-1;
+  rd::Array2D<int8_t> sd(W,H,rd::NO_FLOW);
+  rd::Array2D<int32_t> away(W,H,INF), tw(W,H,INF), fh(W,H,0);
+  flat_seed(dem,sd,away,tw,INF);
+  int rounds=0;
+  const auto tiled=[&](rd::Array2D<int32_t>&d, bool is_max, bool flat_only){
+    for(bool go=true; go; ){ go=false; rounds++;
+      rd::Array2D<int32_t> prev=d;                             // snapshot: cross-seam reads see last round
+      for(int t=0;t<nt;t++){ const int x0=bounds[t], x1=bounds[t+1];
+        for(bool lgo=true; lgo; ){ lgo=false;                  // local convergence within this tile
+          for(int y=0;y<H;y++) for(int x=x0;x<x1;x++){
+            if(flat_only ? !flat_at(dem,sd,x,y) : dem.isNoData(x,y)) continue;
+            for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
+              if(!dem.inGrid(nx,ny)||dem.isNoData(nx,ny)||dem(nx,ny)!=dem(x,y)) continue;
+              const int32_t nv = (nx>=x0 && nx<x1) ? d(nx,ny) : prev(nx,ny);   // in-tile live / cross-seam snapshot
+              if(is_max){ if(nv>d(x,y)){ d(x,y)=nv;   lgo=true; } }
+              else      { if(nv+1<d(x,y)){ d(x,y)=nv+1; lgo=true; } }
+            }
+          }
+        }
+      }
+      for(int i=0;i<(int)d.size();i++) if(d(i)!=prev(i)){ go=true; break; }
+    }
+  };
+  tiled(away,false,true);
+  tiled(tw,  false,true);
+  for(int y=0;y<H;y++) for(int x=0;x<W;x++) fh(x,y)=(flat_at(dem,sd,x,y)&&away(x,y)<INF)?away(x,y):0;
+  tiled(fh, true, false);
+  flat_finish(dem,sd,away,tw,fh,fd,INF);
+  return rounds;
 }
 
 // MOVE 2: footprint-bounded distributed flat resolution. Instead of resolving flats on
