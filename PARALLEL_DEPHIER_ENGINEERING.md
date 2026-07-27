@@ -276,6 +276,26 @@ seams). Caveats: mesas (flats with no low edge) — `resolve_flats` handles them
   the full grid** (conduits and flats both footprint-bounded). Validated **1521/1521 tree AND 1521/1521
   flowdir** (fractals + edge fixtures, single and multi-seam), confirmed first with a throwaway minimal
   test per the numerical-model workflow. *Footprint caveat:* the halo is bounded by the flat's cross-seam
-  **extent**, not strictly O(boundary) — efficient for typical flats; a continent-spanning plateau would
-  need a proportionally larger halo, or the strict-O(boundary) refinement (a 1-cell iterative gradient
-  exchange, one cell of propagation per round). The MPI build can use either — same edge-strip machinery.
+  **extent**, not strictly O(boundary).
+
+**Managing the halo caveat — measured on real GEBCO 30″** (`tools/dephier_flat_extent`, same tile
+extraction as §4). The flat-size distribution is **heavy-tailed**: ~99% of flats are ≤ 16 cells across
+(halo trivial), but a tail of large lakes/wetlands reaches **hundreds of cells** — worst-case bbox
+dimension (= worst-case halo) per contrasting tile: Sahara 95, Australia 111, Great Basin 143, W. Siberia
+163, Amazon 250, Caspian 285, **Great Lakes 851** (a 132,752-cell lake surface). The very largest lakes
+(Caspian, Superior) span *more* than one 30″ tile of modest size. Resolution:
+  - **Default (adaptive halo, move 2) suffices with reasonably large tiles.** §8 showed the light tree is
+    ~GB-scale, so per-rank memory is set by the O(N/P) flood, not the tree — tiles can be large. With a
+    tile edge ≳ 2× the largest expected flat (a few thousand cells), even Great-Lakes-class flats sit
+    within a tile + a bounded halo; overhead is a few-percent and only on the handful of lake tiles.
+  - **Cap + fallback for the giant-lake tail** (a flat wider than the halo cap, i.e. spanning several
+    tiles): cap the halo (~64 covers > 99.5% of flats) and resolve *those* flats with the
+    strict-O(boundary) **iterative 1-cell gradient exchange** (propagate the two Barnes-2014 gradients one
+    cell per round; O(boundary)/round, rounds ~ flat diameter). Keeps per-rank memory O(N/P)+O(boundary)
+    for all inputs; the extra rounds are paid only by the few dozen giant lakes on Earth.
+  - **Escape hatch:** flat direction is physically arbitrary (same tree, same sinks), so a hard-capped
+    halo giving *valid-but-not-serial-identical* routing on giant-lake interiors is an acceptable last
+    resort — no hydrological effect.
+  **Decision:** ship the adaptive halo (done); size MPI tiles from this measurement; build the iterative-
+  exchange fallback with the MPI harness *iff* the chosen tile size leaves any flat uncovered. The
+  measurement (`dephier_flat_extent`) makes the tile-size/fallback call data-driven, as §8 did for Phase C.
