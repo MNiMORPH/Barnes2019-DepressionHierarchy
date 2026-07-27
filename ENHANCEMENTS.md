@@ -168,3 +168,25 @@ and he is re-implementing CHONK's lake solver in that cleaner codebase. Our dist
 lake↔network machinery is a clean division of the four open items above.
 - Flowdir interface note: raw D8 flow accumulation is *already solved and parallel* — richdem's
   `parallel_d8_accum` (Barnes 2017) consumes our flowdirs directly; don't rebuild it.
+
+---
+
+## PARKED TANGENT: DH on spherical / geographic grids
+
+**Status:** parked (2026-07-27, Wickert). For later. Relevant to the *actual* global-30″ goal — the
+current core is Cartesian, but a true global run is on a lat–lon (geographic) grid.
+
+Three things a spherical build must handle:
+1. **Periodic longitude.** The grid wraps at ±180°; the east and west edges are neighbours. Our seam/
+   tiling machinery already resolves vertical seams — a global wrap is essentially "one more seam" joining
+   column 0 to column W−1, so this may be a modest extension of the existing conduit/outlet/HandleEdge
+   passes rather than new machinery.
+2. **Latitude-varying cell geometry.** E–W cell width scales with cos(latitude); N–S ≈ constant. This
+   changes (a) cell **area** → Phase D marginal **volumes** (`dx·dy` per row, not constant — feeds the
+   already-distributed volume pass) and (b) any distance-weighted flow metric (D8 diagonal-vs-cardinal
+   weighting). The tree/labels are unaffected; volumes and metric-weighted routing are.
+3. **Pole singularity.** Meridians converge; the top/bottom rows are near-singular — the genuinely hard
+   part (cap, exclude, or a pole-aware topology).
+
+The tree topology is largely geometry-agnostic; the real work is volumes (per-row area), a periodic-x
+seam, and poles. Worth scoping against real GEBCO 30″ (which is geographic) before a production run.
