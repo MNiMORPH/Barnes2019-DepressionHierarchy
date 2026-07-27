@@ -790,16 +790,19 @@ int main(int argc, char **argv){
            <<" nodes(serial="<<iv_s.n_nodes<<" dist="<<iv_d.n_nodes<<")"
            <<" total_dep_vol(serial="<<iv_s.total_dep_vol<<" dist="<<iv_d.total_dep_vol<<")\n";
 
-  // ---- flowdir check: assemble the per-rank seam-fixed flowdirs, then apply the proven
-  // footprint-bounded flat pass (per-tile resolve_flats with an adaptive halo, option 3; its
-  // per-tile `full` reads model the DEM halo a real rank exchanges). Must equal serial's. ----
+  // ---- flowdir check: assemble the per-rank seam-fixed flowdirs, then resolve flats with ENH-1's
+  // label-free relaxation (resolve_flat_flowdirs_option2): three same-elevation relaxations that
+  // each distribute as a 1-column seam exchange per round -> O(boundary), no flat-extent halo (it
+  // supersedes option 3). Whole-grid here (in-process); each round is one MPI seam round. Must
+  // equal serial's flat routing, cell for cell. ----
   rd::Array2D<int8_t> gFix(W, H, rd::NO_FLOW);
   for(int t=0;t<ntiles;t++){
     const int x0=bounds[t], x1=bounds[t+1];
     for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)
       gFix(x,y) = dist[t].gfix(x-x0,y);
   }
-  const int flat_capped = resolve_flat_flowdirs_distributed(full, bounds, gFix, halo_cap);
+  resolve_flat_flowdirs_option2(full, gFix);   // ENH-1: label-free relaxation, O(boundary), no halo cap
+  (void)halo_cap;                              // option 2 supersedes option 3's cap; arg kept for compat
   long fd_land=0, fd_diff=0;
   for(unsigned i=0;i<full.size();i++){
     if(full.isNoData(i)) continue;
@@ -808,8 +811,7 @@ int main(int argc, char **argv){
   }
   const bool flowdir_ok = (fd_diff==0);
   std::cout<<(flowdir_ok ? "MPI-FLOWDIR-MATCH " : "MPI-FLOWDIR-DIFFER ")<<in_name
-           <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land
-           <<(flat_capped? " (flat tiles hit cap)":"")<<"\n";
+           <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land<<"\n";
 
   return (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok && flowdir_ok) ? 0 : 1;
 #endif

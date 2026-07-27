@@ -98,15 +98,19 @@ inline void resolve_flat_flowdirs_option2(const rd::Array2D<float> &dem, rd::Arr
   }
   // Final direction: steepest descent on the mask among same-elevation neighbours (== same-label),
   // with richdem's d8_masked_FlowDir tie-break (prefer the diagonal on an equal-mask tie). Interior
-  // cells only, matching d8_flow_flats. Overlay onto flat cells that resolved.
+  // cells only, matching d8_flow_flats. Then overlay onto EVERY flat cell exactly as
+  // resolve_flat_flowdirs does (fd(was_flat)=sd(was_flat)): border and unresolved flats become
+  // NO_FLOW, so the overlay is independent of whatever `fd` held on flat cells beforehand.
+  rd::Array2D<int8_t> out(W,H,rd::NO_FLOW);
   for(int y=1;y<H-1;y++) for(int x=1;x<W-1;x++){
     if(!FLAT(x,y) || mask(x,y)>=INF) continue;
     int best=mask(x,y), dir=rd::NO_FLOW;
     for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
       if(dem(nx,ny)!=dem(x,y) || mask(nx,ny)>=INF) continue;               // same-elevation (== same label)
       if(mask(nx,ny)<best || (mask(nx,ny)==best && dir>0 && dir%2==0 && n%2==1)){ best=mask(nx,ny); dir=n; } }
-    if(dir!=rd::NO_FLOW) fd(x,y)=(int8_t)dir;
+    out(x,y)=(int8_t)dir;
   }
+  for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(FLAT(x,y)) fd(x,y)=out(x,y);   // overlay all flat cells
 }
 
 // MOVE 2: footprint-bounded distributed flat resolution. Instead of resolving flats on
