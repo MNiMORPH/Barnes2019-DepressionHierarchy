@@ -18,7 +18,14 @@
 //   Verifies: (a) the shim moves DH edge strips across a multi-rank line with no deadlock, and
 //   (b) BOUNDARY-from-a-1-column-halo == BOUNDARY-from-the-full-grid (the local-first claim).
 
+// Comm backend: the thread shim (in-process validation) by default, or real MPI when built with
+// -DDH_USE_MPI (one rank per process; launch with `mpirun -np <ntiles>`). Both expose the same
+// commt API, so the algorithm code below is identical -- only the transport and driver differ.
+#ifdef DH_USE_MPI
+#include "tools/comm_mpi.hpp"
+#else
 #include "tools/comm_thread.hpp"
+#endif
 #include "dh_canonical.hpp"   // dhtest::canonicalize / invariants (shared with the stitch)
 #include "dh_collapse.hpp"    // CollapseSeamArtifacts            (shared with the stitch)
 #include "dh_flats.hpp"       // resolve_flat_flowdirs[_*]        (shared with the stitch)
@@ -106,6 +113,9 @@ struct ORec    { dh_label_t depa, depb; float oelev; int64_t ocell;
                  template<class Ar> void serialize(Ar &ar){ ar(depa,depb,oelev,ocell); } };
 
 int main(int argc, char **argv){
+#ifdef DH_USE_MPI
+  commt::CommInitMPI();                     // one rank per process; must precede any CommRank/Size
+#endif
   if(argc!=4 && argc!=5){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
     return -1;
@@ -130,6 +140,16 @@ int main(int argc, char **argv){
   }
   bounds.push_back(W);
   const int ntiles = bounds.size() - 1;
+
+#ifdef DH_USE_MPI
+  if(ntiles != commt::CommSize()){
+    if(commt::CommRank()==0)
+      std::cerr<<"error: "<<ntiles<<" tiles from the split but "<<commt::CommSize()
+               <<" MPI ranks; launch with `mpirun -np "<<ntiles<<"`\n";
+    commt::CommFinalizeMPI();
+    return 1;
+  }
+#endif
 
   // Split columns must be strictly increasing and interior to the grid, else a tile would
   // extend past the DEM (out-of-grid read). Fail cleanly rather than abort.
@@ -655,6 +675,32 @@ int main(int argc, char **argv){
   };
   c::CommInit(ntiles, rank_main);
 
+#ifdef DH_USE_MPI
+  // Real-MPI driver: the algorithm ran across processes; the tree (Gdist) is gathered on rank 0.
+  // Verify it against serial there (the strongest single end-to-end check -- the tree depends on
+  // every upstream stage). Per-cell diffs use shared memory and stay under the thread shim.
+  int rc = 0;
+  if(commt::CommRank()==0){
+    const int n_collapsed = CollapseSeamArtifacts(Gdist, full, bounds);
+    auto s_label = ocean_labels(full, ocean_level);
+    rd::Array2D<int8_t> s_fd(W, H, rd::NO_FLOW);
+    auto S = dh::GetDepressionHierarchy<float,rd::Topology::D8>(full, s_label, s_fd);
+    const std::string sig_dist   = dhtest::canonicalize(Gdist);
+    const std::string sig_serial = dhtest::canonicalize(S);
+    const auto iv_d = dhtest::invariants(Gdist);
+    const auto iv_s = dhtest::invariants(S);
+    const bool tree_ok = (sig_dist==sig_serial);
+    std::cout<<(tree_ok ? "MPI-TREE-MATCH " : "MPI-TREE-DIFFER ")<<in_name
+             <<" ranks="<<ntiles<<" collapsed="<<n_collapsed
+             <<" nodes(serial="<<iv_s.n_nodes<<" dist="<<iv_d.n_nodes<<")"
+             <<" total_dep_vol(serial="<<iv_s.total_dep_vol<<" dist="<<iv_d.total_dep_vol<<")"
+             <<" [real MPI]\n";
+    rc = tree_ok ? 0 : 1;
+  }
+  commt::CommFinalizeMPI();
+  return rc;
+#else
+
   // ---- verify: distributed label+fd must equal the full-grid oracle, cell for cell ----
   long ldiff=0, fdiff=0, cells=0, nb_o=0, nb_d=0;
   for(int t=0;t<ntiles;t++){
@@ -766,4 +812,5 @@ int main(int argc, char **argv){
            <<(flat_capped? " (flat tiles hit cap)":"")<<"\n";
 
   return (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok && flowdir_ok) ? 0 : 1;
+#endif
 }

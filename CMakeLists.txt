@@ -43,6 +43,32 @@ if(USE_GDAL AND GDAL_FOUND)
   target_include_directories(dephier_mpi.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(dephier_mpi.exe PRIVATE dephier richdem Threads::Threads)
 
+  # Same harness compiled against the real-MPI comm backend (one rank per process; run with
+  # `mpirun -np <ntiles>`). Validates the tree on rank 0. Only built when MPI is available.
+  find_package(MPI)
+  if(MPI_CXX_FOUND)
+    add_executable(dephier_mpi_real.exe tools/dephier_mpi.cpp)
+    target_include_directories(dephier_mpi_real.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(dephier_mpi_real.exe PRIVATE DH_USE_MPI)
+    target_link_libraries(dephier_mpi_real.exe PRIVATE dephier richdem MPI::MPI_CXX)
+
+    add_executable(comm_mpi_smoke.exe tools/comm_mpi_smoke.cpp)
+    target_include_directories(comm_mpi_smoke.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(comm_mpi_smoke.exe PRIVATE richdem MPI::MPI_CXX)
+
+    # MPI tests launch real processes via mpirun. --oversubscribe lets ranks exceed cores on a
+    # dev box; these are local-only (CI has no MPI runtime, like the richdem-dependent tests).
+    add_test(NAME comm_mpi_smoke
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 --oversubscribe
+                     $<TARGET_FILE:comm_mpi_smoke.exe>)
+    add_test(NAME mpi_real_tree_seam_2rank
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 --oversubscribe
+                     $<TARGET_FILE:dephier_mpi_real.exe> ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/edge_seam.dem -9999 20)
+    add_test(NAME mpi_real_tree_interior_3rank
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 --oversubscribe
+                     $<TARGET_FILE:dephier_mpi_real.exe> ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/edge_interior.dem -9999 13,26)
+  endif()
+
   # The distributed pipeline (built incrementally) must be bit-identical to the in-binary
   # oracle at every stage implemented so far: per-rank PhaseAB (BOUNDARY from a 1-column halo)
   # and the namespace remap (global offsets + label grid). dephier_mpi.exe exits 0 iff every
