@@ -114,3 +114,57 @@ with the differential oracle (the tree must stay bit-identical). Flag alongside 
 - Shares the conduit-resolution machinery (§2) for resolving the newly-opened BOUNDARY cells.
 - Found by: `tools/dephier_mpi.exe` increment 1 (per-rank PhaseAB), which faithfully reproduces the
   stitch abort — evidence the harness matches the stitch even in its failure modes.
+
+---
+
+## RESEARCH DIRECTION: lake ↔ drainage-network integration (CHONK-informed)
+
+**Status:** parked (2026-07-27). A research direction, not a bounded code task. Build when ready;
+intend to explore **joining forces with Boris Gailleton** (see below).
+
+### The idea (Wickert)
+The depression hierarchy (DH) and the tributary river network are both binary directed graphs, and
+they *intersect* — rivers flow through lakes and wetlands. Splice them into one graph so depressions
+act, on the network, as **sinks** (sediment), **capacitors** (water storage), and **mixers** (dissolved
+matter incl. pollutants). Stop pretending the world is a single downhill-integrated network (or
+digitally carving/filling DEMs to force it).
+
+### Verification (what already exists — do NOT rebuild)
+Checked the literature (searches + reading the actual paper/code). The splice + sediment routing are
+**already done, single-node, and are our own lineage** — do not reinvent them:
+- **CHONK 1.0** (Gailleton, Malatesta, Cordonnier, Braun; *GMD* 17, 71–90, 2024) builds its lake tree
+  "with a principle adapted from Barnes et al. (2020)," cites Barnes 2021 (FSM) and Callaghan & Wickert
+  (2019) as closest prior aim, and descends from Garcia-Castellanos' **TISC** (endorheic-LEM pioneer).
+- The splice = a **"fake link"** from each base depression's pit cell to the cells just downstream of its
+  outlet (Fig. 4a, §3.3.2), inserted so lakes sort before their downstream, then cancelled after the
+  topological order is computed. `depressiontree.hpp`: `externode`/`internode`/`node2tree`/`linkhood` +
+  level-sorted `get_treestack`.
+- Sediment routing through lakes is solved via **"de-processing"** (§3.4.3): submerged cells' fluvial/
+  hillslope fluxes are reversed and recomputed with the lake present, guarded by mass-balance checks —
+  the authors call it "convoluted." A generic well-mixed-reservoir operator (`mix_two_proportions`,
+  volume-weighted, renormalized) mixes **sediment provenance** proportions.
+- Also covered: evaporative (leaky) capacity; multiple-flow-direction depressions. "Lakes in LEMs" is an
+  active subfield (also Salles 2019; Camports 2020; Yuan 2019; Geurts 2018), not a gap.
+
+### What is genuinely still open (our candidate contributions, on top of CHONK)
+1. **Distributed / massively-parallel at global scale.** CHONK is single-node (ran on one 32 GB box) and
+   "slow, lots of memory." Our distributed DH (tree+volumes+flowdirs, real MPI, footprint-bounded) is the
+   differentiator — bring CHONK-style lake↔network integration to trillion-cell scale.
+2. **Reactive dissolved solutes / pollutants.** CHONK has the mixing *primitive* (for particulate
+   provenance) but tracks no dissolved chemistry — add concentration + a reaction/decay term per node
+   (generalizes the per-lake nitrogen-removal limnology literature to the whole hierarchy).
+3. **Richer lacustrine deposition.** CHONK's in-lake deposition is a simple uniform "draping," explicitly
+   flagged by the authors as future work.
+4. **Multiple flow directions (MFD)** — CHONK generalizes the DH to MFD; ours (like Barnes) is D8.
+
+### Scope note
+Our tool is *static-DEM analysis at scale*; CHONK is a *landscape-evolution model* (evolving topography).
+Different animals — complementary, which is partly why a collaboration is natural.
+
+### Collaboration
+Consider joining forces with **Boris Gailleton** (Géosciences Rennes; also GFZ Potsdam). His CHONK →
+**DAGGER** (graph backend) → **Scabbard** (topographic-analysis/LEM toolbox) stack is the natural partner,
+and he is re-implementing CHONK's lake solver in that cleaner codebase. Our distributed DH + his
+lake↔network machinery is a clean division of the four open items above.
+- Flowdir interface note: raw D8 flow accumulation is *already solved and parallel* — richdem's
+  `parallel_d8_accum` (Barnes 2017) consumes our flowdirs directly; don't rebuild it.
