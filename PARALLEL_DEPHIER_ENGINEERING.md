@@ -216,3 +216,48 @@ Richard (integration reuse, plan §10) — worth a message, but not a blocker to
 3. **Scale ranks/tiles**; then **distributed Phase D volumes** (plan §9 step 6).
 4. Escalate any single component to its distributed variant only if a later, larger footprint
    measurement on the real global build demands it (it won't, per §4).
+
+---
+
+## 6. Per-cell flowdirs across seams — status + the flat determinism case
+
+`GetDepressionHierarchy` returns a per-cell `flowdirs` array alongside the tree. The distributed build
+must reproduce it too (FSM routes runoff along flowdirs into the depressions).
+
+**Non-flat crossings — DONE (bit-identical).** A tile flood cannot point a cell across its own boundary,
+so seam-crossing cells kept a tile-local direction. The stitch's flowdir fix-up (commit `c47cb9e`)
+restores serial's choice from the conduit pass's cross-seam data: a land pit/seam-seed points to its
+lowest cross-tile neighbour ≤ the pit (highest-index tie); a sea-draining cell points to its highest-index
+adjacent ocean cell. Result: **flowdirs are bit-identical to serial across the entire fractal sweep**
+(β 1.3–2.5, seeds 1–15, single/multi-seam) — 0 diffs wherever flow direction is physically determined.
+
+**Flat plateaus crossing a seam — KNOWN GAP (the determinism case).** On a large flat, DH assigns each
+cell's direction as an **order-dependent byproduct of the flood** (`dephier.hpp:524` — the cell points to
+whichever neighbour claimed it, set by the global radix pop order). When a seam cuts a flat, each tile
+runs that claim from only its share of the flat's exits, so the in-flat routing differs — and the
+difference propagates across the whole flat, not just the seam (measured 177/6084 cells on an 80×80
+flat-plateau fixture; **0 on continuous terrain**). The **tree and every cell's sink are bit-identical**;
+only the arbitrary in-flat direction (a gradient-less surface) differs. So this is a determinism/
+completeness gap, not a hydrology error — FSM fills the same depressions with the same water either way.
+It surfaces only on large flats (lakes, quantized plains) — the §8 vast-flats regime.
+
+**Tractable path (Wickert): adopt Barnes-2014 `resolve_flats` instead of the flood byproduct.** richdem
+already ships it (`richdem/flats/flat_resolution.hpp`, `Barnes2014.hpp`): `BuildAwayGradient` (BFS from
+the flat's high edges) + `BuildTowardsCombinedGradient` (BFS toward its low edges) build a `flat_mask`,
+and `d8_masked_FlowDir` reads each cell's direction off that mask. This routing is a **deterministic
+function of the flat's geometry**, independent of processing order — so it is *reproducible*, which is
+exactly what the flood byproduct is not. Cost to make flat flowdirs bit-identical distributed:
+  1. **Switch DH's flat flowdirs to `resolve_flats`** (serial + tiled). Changes serial's flat directions
+     (from arbitrary flood-claim to Barnes-2014 convergent routing — an *improvement*, and the standard);
+     the depression **tree is unaffected** (flat directions don't touch labels/outlets). This is a core
+     change, so flag for Richard alongside the other serial-output-changing determinism fixes.
+  2. **Distribute the two gradient BFSs** with a cross-seam boundary exchange — the *same* pattern as
+     conduit resolution (§2): each tile computes local high/low-edge distances, exchanges seam values,
+     iterates to convergence (rounds ~ flat diameter in tiles; O(boundary) per round). Then
+     `d8_masked_FlowDir` is a purely local read of the mask.
+This is far cheaper than the intractable alternative (reproducing the flood's global pop order across
+seams). Caveats: mesas (flats with no low edge) — `resolve_flats` handles them; a plateau spanning many
+tiles needs more iteration rounds, but each is footprint-bounded. **Recommendation:** adopt
+`resolve_flats` for flat routing (it improves the serial output too) and distribute it via the boundary-
+exchange BFS when flat-flowdir bit-identity is wanted; until then, the gap is documented and harmless
+(tree + sinks exact).
