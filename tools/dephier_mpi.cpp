@@ -112,6 +112,16 @@ struct ResStrip{ std::vector<dh_label_t> label; std::vector<float> elev; std::ve
 struct ORec    { dh_label_t depa, depb; float oelev; int64_t ocell;
                  template<class Ar> void serialize(Ar &ar){ ar(depa,depb,oelev,ocell); } };
 
+// A rank's per-cell grid slices, gathered to rank 0 under real MPI so the FULL per-cell verification
+// (not just the tree) can run there. Array2D has no cereal serializer, so ship the raw row-major data
+// + dims. O(N) to rank 0 -- validation-grade only (the algorithm itself never gathers a per-cell field).
+struct DistSlice {
+  int32_t w=0, h=0; int32_t nboundary=0, ndep=0; dh_label_t offset=0;
+  std::vector<dh_label_t> label, glab, glab_pc;
+  std::vector<int8_t>     fd, gfix;
+  template<class Ar> void serialize(Ar &ar){ ar(w,h,nboundary,ndep,offset,label,glab,glab_pc,fd,gfix); }
+};
+
 int main(int argc, char **argv){
 #ifdef DH_USE_MPI
   commt::CommInitMPI();                     // one rank per process; must precede any CommRank/Size
@@ -326,7 +336,8 @@ int main(int argc, char **argv){
          TAG_RES_LEFT=8, TAG_ODB_INTRA=9, TAG_ODB_EDGE=10,    // outlets: resolved edge strip / intra-db / edge-db
          TAG_DEPREC=11,                                       // depression records -> rank 0
          TAG_TREE_E=12, TAG_TREE_P=13,                        // Phase D: broadcast tree out_elev / parent
-         TAG_MARG_C=14, TAG_MARG_E=15 };                      // Phase D: reduce marginal cell_count / total_elev
+         TAG_MARG_C=14, TAG_MARG_E=15,                        // Phase D: reduce marginal cell_count / total_elev
+         TAG_DISTSLICE=16 };                                  // gather per-cell grid slices to rank 0 (MPI verify)
   std::map<OutKey,OutVal>         outlet_db_dist;             // rank 0's merged outlet DB (read in verify)
   dh::DepressionHierarchy<float>  Gdist;                      // rank 0's assembled global hierarchy (leaves)
   dh_label_t                      n_global_r0 = 0;            // rank 0's global depression count (incl. ocean)
@@ -676,30 +687,29 @@ int main(int argc, char **argv){
   c::CommInit(ntiles, rank_main);
 
 #ifdef DH_USE_MPI
-  // Real-MPI driver: the algorithm ran across processes; the tree (Gdist) is gathered on rank 0.
-  // Verify it against serial there (the strongest single end-to-end check -- the tree depends on
-  // every upstream stage). Per-cell diffs use shared memory and stay under the thread shim.
-  int rc = 0;
-  if(commt::CommRank()==0){
-    const int n_collapsed = CollapseSeamArtifacts(Gdist, full, bounds);
-    auto s_label = ocean_labels(full, ocean_level);
-    rd::Array2D<int8_t> s_fd(W, H, rd::NO_FLOW);
-    auto S = dh::GetDepressionHierarchy<float,rd::Topology::D8>(full, s_label, s_fd);
-    const std::string sig_dist   = dhtest::canonicalize(Gdist);
-    const std::string sig_serial = dhtest::canonicalize(S);
-    const auto iv_d = dhtest::invariants(Gdist);
-    const auto iv_s = dhtest::invariants(S);
-    const bool tree_ok = (sig_dist==sig_serial);
-    std::cout<<(tree_ok ? "MPI-TREE-MATCH " : "MPI-TREE-DIFFER ")<<in_name
-             <<" ranks="<<ntiles<<" collapsed="<<n_collapsed
-             <<" nodes(serial="<<iv_s.n_nodes<<" dist="<<iv_d.n_nodes<<")"
-             <<" total_dep_vol(serial="<<iv_s.total_dep_vol<<" dist="<<iv_d.total_dep_vol<<")"
-             <<" [real MPI]\n";
-    rc = tree_ok ? 0 : 1;
+  // Real MPI: each rank has only its own dist[] slot (separate address spaces). Gather every rank's
+  // per-cell grid slices to rank 0 so the FULL per-cell verification below runs under real MPI, not
+  // just the tree. Non-zero ranks ship their slice and exit; rank 0 fills dist[] and verifies.
+  if(commt::CommRank()!=0){
+    const auto &R = dist[commt::CommRank()];
+    DistSlice s; s.w=R.label.width(); s.h=R.label.height(); const int nn=s.w*s.h;
+    s.nboundary=R.nboundary; s.ndep=R.ndep; s.offset=R.offset;
+    s.label.resize(nn); s.glab.resize(nn); s.glab_pc.resize(nn); s.fd.resize(nn); s.gfix.resize(nn);
+    for(int i=0;i<nn;i++){ s.label[i]=R.label(i); s.glab[i]=R.glab(i); s.glab_pc[i]=R.glab_pc(i); s.fd[i]=R.fd(i); s.gfix[i]=R.gfix(i); }
+    c::CommSend(s, 0, TAG_DISTSLICE);
+    commt::CommFinalizeMPI();
+    return 0;
   }
-  commt::CommFinalizeMPI();
-  return rc;
-#else
+  for(int t=1;t<ntiles;t++){
+    DistSlice s; c::CommRecv(s, t, TAG_DISTSLICE);
+    auto &R = dist[t]; const int nn=s.w*s.h;
+    R.nboundary=s.nboundary; R.ndep=s.ndep; R.offset=s.offset;
+    R.label  =rd::Array2D<dh_label_t>(s.w,s.h); R.glab=rd::Array2D<dh_label_t>(s.w,s.h);
+    R.glab_pc=rd::Array2D<dh_label_t>(s.w,s.h); R.fd  =rd::Array2D<int8_t>(s.w,s.h);
+    R.gfix   =rd::Array2D<int8_t>(s.w,s.h);
+    for(int i=0;i<nn;i++){ R.label(i)=s.label[i]; R.glab(i)=s.glab[i]; R.glab_pc(i)=s.glab_pc[i]; R.fd(i)=s.fd[i]; R.gfix(i)=s.gfix[i]; }
+  }
+#endif
 
   // ---- verify: distributed label+fd must equal the full-grid oracle, cell for cell ----
   long ldiff=0, fdiff=0, cells=0, nb_o=0, nb_d=0;
@@ -813,6 +823,9 @@ int main(int argc, char **argv){
   std::cout<<(flowdir_ok ? "MPI-FLOWDIR-MATCH " : "MPI-FLOWDIR-DIFFER ")<<in_name
            <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land<<"\n";
 
-  return (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok && flowdir_ok) ? 0 : 1;
+  const int rc = (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok && flowdir_ok) ? 0 : 1;
+#ifdef DH_USE_MPI
+  commt::CommFinalizeMPI();
 #endif
+  return rc;
 }
