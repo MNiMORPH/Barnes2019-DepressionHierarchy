@@ -93,14 +93,14 @@ machinery and then discard it. Option 3 already bounds the problem, so this is s
 
 ---
 
-## ENH-2: seedless tiles have no exterior seed for PhaseAB
+## ENH-2: bowl-interior tiles have no base-level seed for PhaseAB
 
 **Status:** design converged (2026-07-28), implementation pending. Found 2026-07-27 while validating
 the MPI harness increment 1. Pre-existing — the in-process stitch (`tools/dephier_stitch.cpp`) has it
 too, not introduced by the distributed build. Not a blocker for the seeded cases the core was validated
 on (fractals + edge fixtures), but a robustness gap the "correct for ANY input" philosophy wants closed —
-and at global 30″ a **guaranteed** case, not a rare one: any endorheic basin larger than a tile swallows
-a tile whole (Caspian, Tarim, Chad, Altiplano, Great Basin). The first candidate fix below (open the seam
+and at global 30″ a **guaranteed** case, not a rare one: large endorheic basins much bigger than a tile
+contain fully bowl-interior tiles (Caspian, Tarim, Chad, Altiplano, Great Basin). The first candidate fix below (open the seam
 as exterior) was implemented and **reverted** — it severs tile-spanning basins. The correct fix is
 **pit-only seeding**; see Resolution.
 
@@ -110,14 +110,17 @@ as exterior) was implemented and **reverted** — it severs tile-spanning basins
 `GetDepressionHierarchyPhaseAB` throws `std::runtime_error("No OCEAN or BOUNDARY cells found, could
 not make a DepressionHierarchy!")` when a tile contains **no ocean cell and no BOUNDARY cell**. The
 stitch (and the MPI harness, identically) pre-labels a seam-edge cell BOUNDARY only if its steepest
-descent *crosses the seam and is not to ocean*. A tile that is an interior closed bowl — every edge
-cell drains inward, no ocean — therefore gets no exterior seed and PhaseAB aborts. Reproduced on
+descent *crosses the seam and is not to ocean*. A tile that is a **bowl interior** — every edge
+cell drains inward, no ocean — therefore gets no base-level seed and PhaseAB aborts. Reproduced on
 `kerry_test.dem` split 20→col 5 (2 ranks) and `kerry_test11.dem` split 7,15; both the stitch and
 `dephier_mpi.exe` abort with the identical exception, while sibling fixtures of the same size/split
-(e.g. `kerry_test1`, `kerry_test12`) have a seed and pass. So it is **data-dependent**, not geometric.
-At 30″ global scale with large tiles a fully-seedless continental-interior tile is very unlikely (a
-long perimeter almost surely has one outward-draining cell), but "very unlikely" is not "impossible",
-and a build that must be correct for any input has to handle it.
+(e.g. `kerry_test1`, `kerry_test12`) have a base-level seed and pass. So *which* tiles are bowl interiors
+is **data-dependent** (basin locations × tiling), but that *some* occur at 30″ global scale is
+**guaranteed**, not rare: a large compact endorheic basin much bigger than a tile contains tiles whose
+*entire* perimeter drains inward (Caspian, Tarim, Chad, Altiplano, Great Basin). The "long perimeter
+almost surely has one outward-draining cell" intuition holds only when the basin is comparable to or
+smaller than the tile; a basin bigger than the tile defeats it — exactly the regime of the big closed
+basins the WTM cares about.
 
 ### The key realization: a "seed" does two separate jobs
 PhaseAB's priority queue is seeded by two kinds of cell that play *different* roles — the serial case
@@ -125,20 +128,20 @@ hands you both together, so they look like one thing:
 
 - **Pit seeds** — interior local minima (a cell with no lower neighbour). They **start the flood**; each
   becomes a *leaf* depression. Always present: any closed region has a bottom.
-- **Exterior seeds** — ocean/BOUNDARY cells on the flood front. They **anchor the tree to base level**:
-  where the flood's exterior region meets a land depression, outlet discovery emits an outlet with an
-  OCEAN endpoint, and that is the only thing letting PhaseC close the tree at the root (`dephier.hpp:699`,
-  the `depa_set==OCEAN || depb_set==OCEAN` branch).
+- **Base-level seeds** — the exterior (ocean/BOUNDARY) cells on the flood front. They **anchor the tree to
+  base level**: where the flood's exterior region meets a land depression, outlet discovery emits an outlet
+  with an OCEAN endpoint, and that is the only thing letting PhaseC close the tree at the root
+  (`dephier.hpp:699`, the `depa_set==OCEAN || depb_set==OCEAN` branch).
 
-A seedless tile is the **centre of a closed bowl** whose rim lies beyond the tile on every side: every
-seam cell drains *inward*, so nothing is labelled BOUNDARY and there is no ocean. It has the **bottom but
-not the rim** — pit seeds (the flood can run) but no exterior seed (no local anchor). The old
+A **bowl-interior tile** lies entirely inside a closed bowl whose rim is beyond the tile on every side:
+every seam cell drains *inward*, so nothing is labelled BOUNDARY and there is no ocean. It has the
+**bottom but not the rim** — pit seeds (the flood can run) but no base-level seed (no local anchor). The old
 `exterior_cells==0` throw conflated the two jobs: it aborts for lack of the *anchor* even though the
 *flood* needs only the pits.
 
 ### Resolution: pit-only seeding + let the existing seam machinery supply the outlet
-Relax the need for a *local* exterior outlet. When the caller signals a seedless-permitted (interior)
-tile, PhaseAB runs **pit-only**: skip the throw, flood from the interior pits, and let the tile's top
+Relax the need for a *local* base-level outlet. When the caller signals a bowl-interior tile (via
+`permit_without_baselevel_seed`), PhaseAB runs **pit-only**: skip the throw, flood from the interior pits, and let the tile's top
 depression come out **open** — no outlet to the exterior found within the tile.
 
 "Open" is a property of the **outlet graph**, not a flag on the depression object (every leaf leaves
@@ -162,25 +165,26 @@ The tightened statement of how it closes:
 
 So the whole change is: **PhaseAB doesn't need the rim to do its job (find the bottom + internal
 structure); only the assembly needs the rim, and the assembly already looks across seams.** Sill
-*elevations* are absolute DEM values from outlet discovery — the seed affects **topology** (what anchors
-to the root), not **geometry**.
+*elevations* are absolute DEM values from outlet discovery — the base-level seed affects **topology** (what
+anchors to the root), not **geometry**.
 
-**Scope of the code change (small):** add a `bool allow_seedless=false` parameter to
+**Scope of the code change (small):** add a `bool permit_without_baselevel_seed=false` parameter to
 `GetDepressionHierarchyPhaseAB`; the default `false` preserves the serial throw exactly. Replace the
-`exterior_cells==0` throw (`dephier.hpp:350`) with pit-only seeding when `allow_seedless`. Depression 0
+`exterior_cells==0` throw (`dephier.hpp:350`) with pit-only seeding when `permit_without_baselevel_seed`. Depression 0
 (ocean) is already added unconditionally (`dephier.hpp:354–363`). The distributed harness/stitch drop the
-seedless abort and pass `allow_seedless=true`. Everything downstream — namespace remap (a seedless tile's
-empty ocean-0 is simply not shipped; the single global ocean is anchored from rank 0), HandleEdge, PhaseC,
+bowl-interior abort and pass `permit_without_baselevel_seed=true`. Everything downstream — namespace remap
+(a bowl-interior tile's empty ocean-0 is simply not shipped; the single global ocean is anchored from rank
+0), HandleEdge, PhaseC,
 PhaseD, collapse — is untouched.
 
 #### Rejected (implemented, reverted): open the seam as exterior
-Seeding a seedless tile's seam cells as BOUNDARY (`dh_seed.hpp`, now deleted) **severs tile-spanning
-basins**: the seam floor becomes a terminating sink, so the pit tile drains "out" at a spuriously low
+Seeding a bowl-interior tile's seam cells as BOUNDARY (`dh_seed.hpp`, now deleted) **severs tile-spanning
+basins**: the seam floor becomes a terminating sink, so the bowl-interior tile drains "out" at a spuriously low
 elevation *and* neighbour cells draining across resolve into that sink. On `kerry_test.dem` split 5 the
 tree shape came out right but `total_dep_vol` was serial=80 vs dist=5 — the volume above the false base
 destroyed. Seen from PhaseC, it injected **false OCEAN-endpoint outlets** at the seam floor, so assembly
 anchored the basin to a false low root. Pit-only injects *no* false exterior, so PhaseC anchors only where
-a real seed exists. Kept visible as the lesson: the failure was exactly at the seed→PhaseC anchoring
+a real base-level seed exists. Kept visible as the lesson: the failure was exactly at the seed→PhaseC anchoring
 touchpoint, which is why "open the seam" and "pit-only" look similar but are opposites.
 
 Either approach changes tile seeding, so it touches the **stitch too** and must be re-validated against
@@ -188,7 +192,7 @@ serial with the differential oracle (the tree must stay bit-identical). Flag alo
 serial-output-adjacent determinism items for Richard (plan §10).
 
 ### Acceptance criteria
-- A seedless-bowl tile builds without throwing; its basin resolves to the same depression/ocean serial
+- A bowl-interior tile builds without throwing; its basin resolves to the same depression/ocean serial
   assigns (differential oracle STITCH-MATCH + FLOWDIR-MATCH), tree bit-identical.
 - Regression fixture: a small DEM + split that currently aborts (e.g. `kerry_test.dem` split 5) becomes
   a passing `mpi_phaseab_*` / `stitch_edge_*` case.
