@@ -390,6 +390,31 @@ int main(int argc, char **argv){
     }
   }
 
+  // ---- DEBUG: audit the re-derived global outlet set against PhaseAB's own per-tile outlets ----
+  // Set DH_AUDIT_OUTLETS=1 to diff the two outlet-discovery paths in real time. The re-derivation
+  // (above) must reproduce every outlet PhaseAB found, or the two drift (that drift is how the
+  // NoData-ocean inf bug arose). For each tile we remap PhaseAB's tile.outlets to global labels via
+  // tile.g and check the pair appears in the re-derived set with the same outlet elevation. Pairs
+  // touching BOUNDARY are skipped -- their endpoints are only meaningful AFTER conduit resolution,
+  // which is exactly what the re-derivation applies, so a raw comparison there is not apples-to-apples.
+  if(std::getenv("DH_AUDIT_OUTLETS")){
+    std::map<std::pair<dh_label_t,dh_label_t>,float> grid;
+    for(const auto &o : outlets) grid[std::minmax(o.depa,o.depb)] = o.out_elev;
+    long miss=0, ediff=0;
+    for(const auto &tile : tiles)
+      for(const auto &o : tile.outlets){
+        const dh_label_t a=tile.g(o.depa), b=tile.g(o.depb);
+        if(a==BOUNDARY || b==BOUNDARY || a==b) continue;         // BOUNDARY: needs resolution to compare
+        const auto it = grid.find(std::minmax(a,b));
+        if(it==grid.end()){ miss++;
+          std::cerr<<"AUDIT miss: PhaseAB outlet {"<<a<<","<<b<<"} elev="<<o.out_elev<<" absent from re-derived set\n"; }
+        else if(it->second!=o.out_elev){ ediff++;
+          std::cerr<<"AUDIT elev: pair {"<<a<<","<<b<<"} PhaseAB="<<o.out_elev<<" re-derived="<<it->second<<"\n"; }
+      }
+    std::cerr<<"AUDIT-OUTLETS "<<in_name<<" splits="<<argv[3]<<": "<<miss<<" missing pair(s), "
+             <<ediff<<" elevation diff(s) (PhaseAB tile.outlets vs re-derived global)\n";
+  }
+
   // ---- one global PhaseCD ----
   dh::GetDepressionHierarchyPhaseCD<float>(G, outlets, full, gLabel);
 
