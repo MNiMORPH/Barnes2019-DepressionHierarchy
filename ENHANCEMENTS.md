@@ -95,14 +95,37 @@ machinery and then discard it. Option 3 already bounds the problem, so this is s
 
 ## ENH-2: bowl-interior tiles have no base-level seed for PhaseAB
 
-**Status:** design converged (2026-07-28), implementation pending. Found 2026-07-27 while validating
-the MPI harness increment 1. Pre-existing — the in-process stitch (`tools/dephier_stitch.cpp`) has it
-too, not introduced by the distributed build. Not a blocker for the seeded cases the core was validated
-on (fractals + edge fixtures), but a robustness gap the "correct for ANY input" philosophy wants closed —
-and at global 30″ a **guaranteed** case, not a rare one: large endorheic basins much bigger than a tile
-contain fully bowl-interior tiles (Caspian, Tarim, Chad, Altiplano, Great Basin). The first candidate fix below (open the seam
-as exterior) was implemented and **reverted** — it severs tile-spanning basins. The correct fix is
-**pit-only seeding**; see Resolution.
+**Status:** pit-only seeding IMPLEMENTED (2026-07-28, commits `523b3f6` core flag, `7c358ce` harness,
+`766a7bf` collapse, `263ab19` diagnostic guard) — but bit-identity is **INCOMPLETE**; the build no longer
+aborts, yet the tiled tree still differs from serial for most bowl-interior geometries, and a subset is
+outright wrong. Found 2026-07-27 while validating the MPI harness increment 1. Pre-existing — the
+in-process stitch has it too. At global 30″ a **guaranteed** case, not a rare one: large endorheic basins
+much bigger than a tile contain fully bowl-interior tiles (Caspian, Tarim, Chad, Altiplano, Great Basin).
+The first candidate fix below (open the seam as exterior) was implemented and **reverted** — it severs
+tile-spanning basins. The correct base fix is **pit-only seeding**; see Resolution.
+
+### Implementation status vs serial (2026-07-28) — measured, NOT yet closed
+Exhaustive fixture sweep `kerry_test*/testdem* × all split columns` at `-9999` (a crude uniform ocean
+level — several fixtures then show *pre-existing* seeded DIFFERs unrelated to ENH-2; those are a sweep
+artifact, ignore). Of the **110** splits that used to ABORT (now build pit-only):
+- **7** bit-identical to serial (STITCH-MATCH). ✅
+- **69** finite volume, correct aggregates, but **tree shape differs** — the moat `cell_count` and the
+  ocean_linked overflow nesting reconnect differently across the seam than serial (a *different* artifact
+  class from the flat-straddle meta the collapse pass now handles). Cosmetic w.r.t. volume; fails byte-
+  identity.
+- **34** `stitch total_dep_vol = inf` — **REAL BUG**: the open top depression is never closed, so PhaseD
+  fills it to infinity. The seam machinery (HandleEdge→PhaseC) does NOT supply its outlet in these cases.
+  Clusters at extreme/thin-tile splits (1, N−1, …). This is the load-bearing gap: my earlier claim that
+  "the existing seam machinery always closes the open depression" is FALSE — it holds for 76/110, fails
+  for 34/110. `scratchpad/inf_cases.txt` lists them.
+
+**What landed and is validated (0 regressions vs the serial oracle on the full sweep):** the flag
+(`permit_without_baselevel_seed`), the harness passing it, the collapse `Pass B` meta-dissolve widening
+(+14 flat-straddle cases fixed, incl. seeded ones), and the divergence-dump bounds guard. **What remains
+(NOT done):** (a) the 34 inf-volume closures — the actual ENH-2 correctness gap; (b) the 69 shape-only
+residuals if byte-identity is required. **Open scoping question for Andy:** is byte-identical-to-serial
+the bar for bowl-interior tiles, or is correct-volume + valid-hierarchy enough? That decides whether (b)
+is in scope. (a) must be fixed regardless.
 
 **Type:** correctness / robustness (tiling seeding).
 
