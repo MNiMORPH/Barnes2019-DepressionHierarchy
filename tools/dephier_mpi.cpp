@@ -122,6 +122,27 @@ struct DistSlice {
   template<class Ar> void serialize(Ar &ar){ ar(w,h,nboundary,ndep,offset,label,glab,glab_pc,fd,gfix); }
 };
 
+// Seam exchange + convergence for the per-rank flat resolution (dh_flats.hpp resolve_flat_flowdirs_rank).
+// exch(): send my owned edge columns to my seam neighbours and receive theirs into the halos (CommSend is
+// non-blocking in both backends, so send-both-then-recv-both cannot deadlock). any(): OR each rank's
+// "changed?" via a gather to rank 0 + broadcast (no collective primitive), which also barriers the round.
+struct FlatComm {
+  int r, ntiles; bool hasL, hasR; int tL, tR, tChg, tCont;
+  template<class T> void exch(std::vector<T>& hL, std::vector<T>& hR,
+                              const std::vector<T>& myL, const std::vector<T>& myR){
+    if(hasR) c::CommSend(myR, r+1, tR);                 // my right edge -> right neighbour (its left halo)
+    if(hasL) c::CommSend(myL, r-1, tL);                 // my left  edge -> left  neighbour (its right halo)
+    if(hasL){ c::CommRecv(hL, r-1, tR); }               // left  neighbour's right edge (it sent with tR)
+    if(hasR){ c::CommRecv(hR, r+1, tL); }               // right neighbour's left  edge (it sent with tL)
+  }
+  bool any(bool local){
+    if(r==0){ bool a=local; uint8_t o;
+      for(int t=1;t<ntiles;t++){ c::CommRecv(o,t,tChg); a = a||(o!=0); }
+      uint8_t ao=a?1:0; for(int t=1;t<ntiles;t++) c::CommSend(ao,t,tCont); return a;
+    } else { uint8_t lo=local?1:0; c::CommSend(lo,0,tChg); uint8_t ao; c::CommRecv(ao,0,tCont); return ao!=0; }
+  }
+};
+
 int main(int argc, char **argv){
 #ifdef DH_USE_MPI
   commt::CommInitMPI();                     // one rank per process; must precede any CommRank/Size
@@ -341,7 +362,9 @@ int main(int argc, char **argv){
          TAG_DEPREC=11,                                       // depression records -> rank 0
          TAG_TREE_E=12, TAG_TREE_P=13,                        // Phase D: broadcast tree out_elev / parent
          TAG_MARG_C=14, TAG_MARG_E=15,                        // Phase D: reduce marginal cell_count / total_elev
-         TAG_DISTSLICE=16 };                                  // gather per-cell grid slices to rank 0 (MPI verify)
+         TAG_DISTSLICE=16,                                    // gather per-cell grid slices to rank 0 (MPI verify)
+         TAG_FLAT_L=17, TAG_FLAT_R=18,                        // ENH-1 per-rank flats: seam field columns (L/R dir)
+         TAG_FLAT_CHG=19, TAG_FLAT_CONT=20 };                 // ENH-1 per-rank flats: convergence gather / continue
   std::map<OutKey,OutVal>         outlet_db_dist;             // rank 0's merged outlet DB (read in verify)
   dh::DepressionHierarchy<float>  Gdist;                      // rank 0's assembled global hierarchy (leaves)
   dh_label_t                      n_global_r0 = 0;            // rank 0's global depression count (incl. ocean)
@@ -682,6 +705,11 @@ int main(int argc, char **argv){
       }
     }
 
+    // ENH-1: resolve THIS tile's flats per-rank (bit-identical to serial), holding only the tile + a
+    // 1-column halo -- three monotone relaxations with a per-round seam exchange + convergence all-reduce.
+    { FlatComm fc{r, ntiles, r>0, r<ntiles-1, TAG_FLAT_L, TAG_FLAT_R, TAG_FLAT_CHG, TAG_FLAT_CONT};
+      resolve_flat_flowdirs_rank(dem, gfix, fc); }
+
     dist[r].label = std::move(label);                            // ranks write disjoint slots
     dist[r].gfix  = std::move(gfix);
     dist[r].fd    = std::move(fd);
@@ -808,29 +836,28 @@ int main(int argc, char **argv){
            <<" nodes(serial="<<iv_s.n_nodes<<" dist="<<iv_d.n_nodes<<")"
            <<" total_dep_vol(serial="<<iv_s.total_dep_vol<<" dist="<<iv_d.total_dep_vol<<")\n";
 
-  // ---- flowdir check: assemble the per-rank seam-fixed flowdirs, then resolve flats with ENH-1's
-  // label-free relaxation in its PER-TILE form (resolve_flat_flowdirs_option2_tiled): each of the
-  // three relaxations runs tile-by-tile with a 1-column seam exchange per round (a value crosses <=1
-  // seam/round; flat_seam_rounds ~ flat diameter in tiles), O(boundary)/round, no flat-extent halo --
-  // it supersedes option 3. No tile reads another tile's interior. Must equal serial, cell for cell. ----
+  // ---- flowdir check: each rank now resolves ITS flats per-rank (ENH-1, resolve_flat_flowdirs_rank in
+  // rank_main above) using a 1-column seam exchange + convergence all-reduce -- so no rank ever holds a
+  // full-grid field. Here we only ASSEMBLE the per-rank results for the differential check; the flat pass
+  // no longer runs centrally. Must equal serial (resolve_flat_flowdirs on the full grid), cell for cell. ----
   rd::Array2D<int8_t> gFix(W, H, rd::NO_FLOW);
   for(int t=0;t<ntiles;t++){
     const int x0=bounds[t], x1=bounds[t+1];
     for(int y=0;y<H;y++) for(int x=x0;x<x1;x++)
       gFix(x,y) = dist[t].gfix(x-x0,y);
   }
-  const int flat_rounds = resolve_flat_flowdirs_option2_tiled(full, bounds, gFix);  // ENH-1 per-tile relaxation
-  (void)halo_cap;                              // option 2 supersedes option 3's cap; arg kept for compat
+  (void)halo_cap;                              // option 2 (now per-rank) supersedes option 3's cap; arg kept for compat
   long fd_land=0, fd_diff=0;
+  rd::Array2D<int8_t> sdf(W,H,rd::NO_FLOW); rd::d8_flow_directions(full, sdf);   // to split diffs flat vs non-flat
+  long fd_flat=0;                             // diffs at FLAT cells = the per-rank flat resolution's own error
   for(unsigned i=0;i<full.size();i++){
     if(full.isNoData(i)) continue;
     fd_land++;
-    if(gFix(i)!=s_fd(i)) fd_diff++;
+    if(gFix(i)!=s_fd(i)){ fd_diff++; if(sdf(i)==rd::NO_FLOW) fd_flat++; }
   }
   const bool flowdir_ok = (fd_diff==0);
   std::cout<<(flowdir_ok ? "MPI-FLOWDIR-MATCH " : "MPI-FLOWDIR-DIFFER ")<<in_name
-           <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land
-           <<" flat_seam_rounds="<<flat_rounds<<"\n";
+           <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land<<" flat_diff="<<fd_flat<<"\n";
 
   const int rc = (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok && flowdir_ok) ? 0 : 1;
 #ifdef DH_USE_MPI

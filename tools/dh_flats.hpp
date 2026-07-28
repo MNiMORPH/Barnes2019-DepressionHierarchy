@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 namespace rd = richdem;
@@ -148,6 +149,88 @@ inline int resolve_flat_flowdirs_option2_tiled(const rd::Array2D<float>&dem, con
   tiled(fh, true, false);
   flat_finish(dem,sd,away,tw,fh,fd,INF);
   return rounds;
+}
+
+// GENUINELY PER-RANK form (ENH-1 distributed): a rank owns W columns x H rows (`owndem`, its tile) and
+// resolves ITS flats bit-identically to the whole-grid form, holding only its tile + 1-column halos.
+// Mechanism = option 2 (three monotone relaxations over same-elevation adjacency) with the cross-seam
+// reads served by a 1-column halo refreshed each round, and the round-loop's global "changed?" served by
+// an all-reduce -- so a value crosses <=1 seam/round, rounds ~ flat diameter in tiles, O(boundary)/round,
+// no full grid on any rank. `comm` supplies the seam exchange + convergence:
+//   template<class T> void exch(hL, hR, myLeftEdge, myRightEdge)  // halo <- neighbour edges (empty if none)
+//   bool any(bool localChanged)                                    // OR across ranks
+//   bool hasL, hasR                                                // has a left/right seam neighbour
+// Overlays resolved directions onto the flat cells of `gfix` (like resolve_flat_flowdirs). Padded layout:
+// pad a halo column ONLY on a side that has a real seam neighbour, so a NO-neighbour side leaves the owned
+// edge column AS THE ARRAY EDGE -- exactly the true grid edge, where d8_flow_directions drains off-map and
+// d8_flow_flats' interior loop leaves the cell alone (padding it with NoData instead would wrongly make the
+// grid-edge cell a flat and resolve it). Owned columns sit at padded x in [off, off+W); off = hasL.
+template<class Comm>
+inline void resolve_flat_flowdirs_rank(const rd::Array2D<float>& owndem, rd::Array2D<int8_t>& gfix, Comm& comm){
+  const int W=owndem.width(), H=owndem.height(); const int32_t INF=1<<28; const float ND=owndem.noData();
+  const int hasL=comm.hasL?1:0, hasR=comm.hasR?1:0;
+  const int PW=W+hasL+hasR, off=hasL, LX=off, RX=off+W-1;   // owned edges LX,RX; halos at 0 and PW-1
+  const auto haloExch=[&](auto& arr){
+    using T=typename std::remove_reference<decltype(arr(0,0))>::type;
+    std::vector<T> myL(H), myR(H), hL, hR;
+    for(int y=0;y<H;y++){ myL[y]=arr(LX,y); myR[y]=arr(RX,y); }
+    comm.exch(hL,hR,myL,myR);
+    if(hasL) for(int y=0;y<H;y++) arr(0,   y)=hL[y];
+    if(hasR) for(int y=0;y<H;y++) arr(PW-1,y)=hR[y];
+  };
+  rd::Array2D<float> dem(PW,H,ND); dem.setNoData(ND);
+  for(int y=0;y<H;y++) for(int x=0;x<W;x++) dem(off+x,y)=owndem(x,y);
+  haloExch(dem);
+  // sd: compute locally (correct for OWNED cells -- their neighbours are all in the padded array, and a
+  // no-neighbour owned edge is the array edge, so off-map drainage matches serial), overwrite halo sd.
+  rd::Array2D<int8_t> sd(PW,H,rd::NO_FLOW); rd::d8_flow_directions(dem, sd); haloExch(sd);
+  const auto flatp=[&](int x,int y){ return !dem.isNoData(x,y) && sd(x,y)==rd::NO_FLOW; };
+  rd::Array2D<int32_t> away(PW,H,INF), tw(PW,H,INF), fh(PW,H,0);
+  for(int y=0;y<H;y++) for(int x=LX;x<=RX;x++){ if(dem.isNoData(x,y)) continue;
+    for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n]; if(!dem.inGrid(nx,ny)||dem.isNoData(nx,ny)) continue;
+      if(flatp(x,y)  && dem(nx,ny)>dem(x,y))                        away(x,y)=1;
+      if(!flatp(x,y) && flatp(nx,ny) && dem(nx,ny)==dem(x,y))       tw(x,y)=1;
+    } }
+  // one monotone relaxation, distributed: halo (round R-1 neighbour edge) fixed while owned converges locally.
+  const auto relax=[&](rd::Array2D<int32_t>& d, bool is_max, bool flat_only){
+    haloExch(d);                                          // halo <- neighbour's seed edge (round -1)
+    for(bool go=true; go; ){ bool changed=false;
+      for(bool lgo=true; lgo; ){ lgo=false;
+        for(int y=0;y<H;y++) for(int x=LX;x<=RX;x++){
+          if(flat_only ? !flatp(x,y) : dem.isNoData(x,y)) continue;
+          for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
+            if(!dem.inGrid(nx,ny)||dem.isNoData(nx,ny)||dem(nx,ny)!=dem(x,y)) continue;
+            const int32_t nv=d(nx,ny);
+            if(is_max){ if(nv>d(x,y)){ d(x,y)=nv;   lgo=changed=true; } }
+            else      { if(nv+1<d(x,y)){ d(x,y)=nv+1; lgo=changed=true; } }
+          }
+        }
+      }
+      haloExch(d);                                        // publish new edge, receive neighbour's new edge
+      go = comm.any(changed);                             // any rank still changing? (also the round barrier)
+    }
+  };
+  relax(away,false,true);
+  relax(tw,  false,true);
+  for(int y=0;y<H;y++) for(int x=LX;x<=RX;x++) fh(x,y)=(flatp(x,y)&&away(x,y)<INF)?away(x,y):0;
+  relax(fh, true, false);
+  // finish: Barnes-2014 mask, then masked steepest-descent over owned flats (needs a mask halo at seams).
+  rd::Array2D<int32_t> mask(PW,H,INF);
+  for(int y=0;y<H;y++) for(int x=LX;x<=RX;x++){ const bool f=flatp(x,y);
+    if(f && tw(x,y)<INF)       mask(x,y)=(away(x,y)<INF)?(fh(x,y)-away(x,y)+2*tw(x,y)):(2*tw(x,y));
+    else if(!f && tw(x,y)<INF) mask(x,y)=2*tw(x,y);
+  }
+  haloExch(mask);
+  rd::Array2D<int8_t> out(W,H,rd::NO_FLOW);
+  for(int y=1;y<H-1;y++) for(int x=1;x<PW-1;x++){         // padded interior: skips global grid x-edges + halos
+    if(!flatp(x,y) || mask(x,y)>=INF || x<LX || x>RX) continue;
+    int best=mask(x,y), dir=rd::NO_FLOW;
+    for(int n=1;n<=8;n++){ int nx=x+rd::d8x[n], ny=y+rd::d8y[n];
+      if(dem(nx,ny)!=dem(x,y) || mask(nx,ny)>=INF) continue;                      // same-elevation, resolved
+      if(mask(nx,ny)<best || (mask(nx,ny)==best && dir>0 && dir%2==0 && n%2==1)){ best=mask(nx,ny); dir=n; } }
+    out(x-off,y)=(int8_t)dir;
+  }
+  for(int y=0;y<H;y++) for(int x=LX;x<=RX;x++) if(flatp(x,y)) gfix(x-off,y)=out(x-off,y);
 }
 
 // MOVE 2: footprint-bounded distributed flat resolution. Instead of resolving flats on
