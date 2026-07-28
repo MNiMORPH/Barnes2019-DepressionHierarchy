@@ -8,14 +8,16 @@ be posted to the MNiMORPH fork's tracker when wanted.
 
 ## ENH-1: bit-identical O(boundary) distributed flat resolution ("option 2")
 
-**Status:** DONE (2026-07-27, commits `23bba02` core, `0abce35` harness integration). The label-free
-three-relaxation form (`resolve_flat_flowdirs_option2`, `tools/dh_flats.hpp`) is bit-identical to
-richdem's `resolve_flat_flowdirs` on the edge fixtures AND all kerry fractals, and is now the harness
-flat pass (MPI-FLOWDIR-MATCH), superseding option 3's halo cap. It is O(boundary) for ANY flat extent.
-*Remaining (same class of gap as the per-cell MPI verification):* the harness runs the relaxations on
-the whole grid in-process; a real-MPI build runs the identical D8-stencil relaxations per tile with a
-1-column seam exchange per round (structurally evident, not yet a separate driver). See the VALIDATED
-SIMPLIFICATION note below for the mechanism, and `tools/flat_mask_reconstruct_test.cpp` for the proof.
+**Status:** DONE, now GENUINELY PER-RANK (2026-07-27 core `23bba02`/`0abce35`; 2026-07-29 distribution
+`9075f99`). The label-free three-relaxation form (`resolve_flat_flowdirs_option2`, `tools/dh_flats.hpp`)
+is bit-identical to richdem's `resolve_flat_flowdirs`, superseding option 3's halo cap, O(boundary) for
+ANY flat extent. **The distribution plumbing is now built:** `resolve_flat_flowdirs_rank` runs the three
+relaxations per rank on the tile + a 1-column halo, with a per-round seam exchange and a gather→OR→
+broadcast convergence all-reduce (`FlatComm` in `dephier_mpi.cpp`); the central full-grid pass is retired.
+No rank materializes a full-grid field. Validated: `flat_diff=0` (per-rank flat cells bit-identical to
+serial) across all 335 fixture×split cases; suite 14/14; `tools/flat_mask_reconstruct_test.cpp` guards the
+underlying identity. This was the last per-rank algorithm step; the whole distributed build (tree +
+flowdirs) is now O(N/P)+O(boundary).
 
 Original framing (kept for context): designed, deferred (the problem was already *bounded* by option 3;
 this recovers bit-identity on the giant-flat tail without growing per-rank memory).
