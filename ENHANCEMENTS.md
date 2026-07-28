@@ -113,19 +113,23 @@ artifact, ignore). Of the **110** splits that used to ABORT (now build pit-only)
   ocean_linked overflow nesting reconnect differently across the seam than serial (a *different* artifact
   class from the flat-straddle meta the collapse pass now handles). Cosmetic w.r.t. volume; fails byte-
   identity.
-- **34** `stitch total_dep_vol = inf` — **REAL BUG**: the open top depression is never closed, so PhaseD
-  fills it to infinity. The seam machinery (HandleEdge→PhaseC) does NOT supply its outlet in these cases.
-  Clusters at extreme/thin-tile splits (1, N−1, …). This is the load-bearing gap: my earlier claim that
-  "the existing seam machinery always closes the open depression" is FALSE — it holds for 76/110, fails
-  for 34/110. `scratchpad/inf_cases.txt` lists them.
+- **34** `stitch total_dep_vol = inf` — a real bug, but **PRE-EXISTING in the stitch, NOT caused by ENH-2**
+  (verified: the pre-ENH-2 code at `ddb3eca` also produces inf — `testdem8.dem 0 1`: serial=239, stitch=inf,
+  node counts match 3=3). It is an **intra-tile** failure: a basin bounded by NoData-as-ocean (these
+  fixtures use `NODATA_value=9`, so `ocean_labels` turns the 9-ring into OCEAN) links to ocean in serial
+  (`out=9`) but the tiled stitch leaves it a separate open root (`out=inf`) — no split even runs through it.
+  ENH-2 merely surfaces it in the `-9999` sweep by letting the bowl-interior tiles build. Fixing it is a
+  SEPARATE pre-existing-stitch task. `scratchpad/inf_cases.txt` lists the sweep cases; minimal repro
+  `testdem8.dem 0 1`.
 
 **What landed and is validated (0 regressions vs the serial oracle on the full sweep):** the flag
 (`permit_without_baselevel_seed`), the harness passing it, the collapse `Pass B` meta-dissolve widening
-(+14 flat-straddle cases fixed, incl. seeded ones), and the divergence-dump bounds guard. **What remains
-(NOT done):** (a) the 34 inf-volume closures — the actual ENH-2 correctness gap; (b) the 69 shape-only
-residuals if byte-identity is required. **Open scoping question for Andy:** is byte-identical-to-serial
-the bar for bowl-interior tiles, or is correct-volume + valid-hierarchy enough? That decides whether (b)
-is in scope. (a) must be fixed regardless.
+(+14 flat-straddle cases fixed, incl. seeded ones), and the divergence-dump bounds guard. **What remains:**
+(a) the 34 inf-volume cases — a **pre-existing** stitch bug (intra-tile NoData-as-ocean basin not linking to
+ocean), surfaced but not caused by ENH-2; fix as a separate task. (b) the 69 shape-only residuals — the
+actual ENH-2 bit-identity gap (bowl-interior moat/nesting reconnection), in scope only if byte-identity is
+required. **Open scoping question for Andy:** is byte-identical-to-serial the bar for bowl-interior tiles,
+or is correct-volume + valid-hierarchy enough? That decides whether (b) is in scope.
 
 **Type:** correctness / robustness (tiling seeding).
 
