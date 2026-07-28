@@ -306,13 +306,17 @@ int main(int argc, char **argv){
       db[{key.first,key.second}] = {oe,oc};
   };
   std::map<OutKey,OutVal> odb;
+  // Skip a cell only if NoData AND not OCEAN -- a NoData-as-OCEAN cell is a real base level whose
+  // adjacency to a land depression is a genuine basin->ocean outlet (mirrors the stitch fix 261bbcd;
+  // the whole harness re-derives outlets from resolved labels, so the same NoData-skip lived here too).
+  const auto skip_o = [&](int x,int y){ return full.isNoData(x,y) && gLabel_oracle_pc(x,y)!=OCEAN; };
   for(int y=0;y<H;y++)
     for(int x=0;x<W;x++){
-      if(full.isNoData(x,y)) continue;
+      if(skip_o(x,y)) continue;
       for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
         if(!dx && !dy) continue;
         const int nx=x+dx, ny=y+dy;
-        if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
+        if(!full.inGrid(nx,ny) || skip_o(nx,ny)) continue;
         if(tile_of(nx)!=tile_of(x)) continue;             // cross-seam handled by HandleEdge
         reduce(odb, gLabel_oracle_pc(x,y), gLabel_oracle_pc(nx,ny),
                full(x,y), full.xyToI(x,y), full(nx,ny), full.xyToI(nx,ny));
@@ -321,9 +325,9 @@ int main(int argc, char **argv){
   for(size_t b=1;b+1<bounds.size();b++){
     const int cA=bounds[b]-1, cB=bounds[b];
     for(int y=0;y<H;y++){
-      if(full.isNoData(cA,y)) continue;
+      if(skip_o(cA,y)) continue;
       for(int ny=y-1;ny<=y+1;ny++){
-        if(ny<0 || ny>=H || full.isNoData(cB,ny)) continue;
+        if(ny<0 || ny>=H || skip_o(cB,ny)) continue;
         reduce(odb, gLabel_oracle_pc(cA,y), gLabel_oracle_pc(cB,ny),
                full(cA,y), full.xyToI(cA,y), full(cB,ny), full.xyToI(cB,ny));
       }
@@ -502,13 +506,16 @@ int main(int argc, char **argv){
     c::CommBarrier();                                            // separate the conduit gather from this one
     // Intra-tile outlet DB: adjacencies whose neighbour is in THIS tile (local: own columns only).
     std::map<OutKey,OutVal> myintra;
+    // Skip a cell only if NoData AND not OCEAN (mirrors skip_o / the stitch fix 261bbcd): a
+    // NoData-as-OCEAN cell's adjacency to a land depression is a real basin->ocean outlet.
+    const auto skip_d = [&](int lx,int ly){ return dem.isNoData(lx,ly) && glab_pc(lx,ly)!=OCEAN; };
     for(int y=0;y<H;y++) for(int gx=x0;gx<x1;gx++){
-      if(dem.isNoData(gx-x0,y)) continue;
+      if(skip_d(gx-x0,y)) continue;
       for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
         if(!dx && !dy) continue;
         const int nx=gx+dx, ny=y+dy;
         if(nx<x0||nx>=x1||ny<0||ny>=H) continue;                // same-tile neighbours only
-        if(dem.isNoData(nx-x0,ny)) continue;
+        if(skip_d(nx-x0,ny)) continue;
         reduce(myintra, glab_pc(gx-x0,y), glab_pc(nx-x0,ny),
                dem(gx-x0,y), (int64_t)y*W+gx, dem(nx-x0,ny), (int64_t)ny*W+nx);
       }
@@ -525,9 +532,10 @@ int main(int argc, char **argv){
       ResStrip nbr; c::CommRecv(nbr, r+1, TAG_RES_LEFT);
       const int cA=x1-1, cB=bounds[r+1];                        // own right edge / neighbour left edge (x1)
       for(int y=0;y<H;y++){
-        if(dem.isNoData(cA-x0,y)) continue;
+        if(skip_d(cA-x0,y)) continue;
         for(int ny=y-1;ny<=y+1;ny++){
-          if(ny<0||ny>=H||nbr.nodata[ny]) continue;
+          if(ny<0||ny>=H) continue;
+          if(nbr.nodata[ny] && nbr.label[ny]!=OCEAN) continue;  // NoData neighbour kept only if OCEAN
           reduce(myedgedb, glab_pc(cA-x0,y), nbr.label[ny],
                  dem(cA-x0,y), (int64_t)y*W+cA, nbr.elev[ny], (int64_t)ny*W+cB);
         }
