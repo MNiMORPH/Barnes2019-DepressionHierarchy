@@ -204,6 +204,95 @@ serial-output-adjacent determinism items for Richard (plan §10).
 
 ---
 
+## ENH-3: permit DH in internally drained regions (no external base level)
+
+**Status:** design sketched (2026-07-28, from the Mars / seafloor design exchange); **scoping DECIDED
+2026-07-28 = Option A** (mode (b), closed-catalogue), shaped so a configurable base level (Option B) is a
+purely *additive* extension later. Implementation pending and **gated on ENH-2** — this is the small
+top-of-tree increment on ENH-2's pit-only seeding. Not a blocker for Earth-with-ocean.
+
+**Type:** feature / generality (base-level model). A capability increase, not a robustness fix.
+
+### Motivation
+DH currently *requires* an external base level: PhaseAB seeds from OCEAN/BOUNDARY cells and PhaseC closes
+the tree only through an OCEAN-endpoint outlet (`dephier.hpp:699`) — hard-wiring "the world drains to the
+sea." The important internally drained problems have no sea at all:
+- **Whole planets without an ocean.** Mars (MOLA) is one closed endorheic system; its ultimate low is
+  Hellas (~−8 km). A global Mars run has zero ocean cells — it aborts today.
+- **Earth's seafloor as the object of study.** Invert the usual base level: catalogue ocean-floor
+  depressions (trenches, abyssal basins) rooted at the global bathymetric minimum (Challenger Deep,
+  ~−11 km), instead of treating the sea surface as base level.
+- **Isolated endorheic basins in their own frame.** A regional DEM clipped to the Caspian, Tarim, Chad,
+  Altiplano, or Great Basin watershed is a *whole* closed domain, not a tile of a larger one.
+
+The ocean-seeded case is the *special* case; internally drained is the general one.
+
+**ENH-2 vs ENH-3 (precise):** ENH-2 = a **bowl-interior *tile*** inside an ocean-bearing domain (its rim
+is in a neighbour tile, and the open-root chain lands at a real ocean elsewhere). ENH-3 = a **closed
+*domain*** — no ocean anywhere, so that chain never terminates and the hierarchy must close on a virtual
+base level. ENH-3 reuses all of ENH-2's pit-only flood; it adds only the domain-level closure.
+
+### Resolution — Option A (mode b, DECIDED), with mode (a) as the quick alternative
+**(b) Closed-catalogue — DECIDED.** Keep every basin, the deepest included, as a real depression. Reuse
+ENH-2 `permit_without_baselevel_seed` so PhaseAB runs pit-only; the domain's top depression comes out
+**open** (a dangling non-ocean root, per ENH-2's definition). The one genuinely new piece is the
+**domain-level closure**: with no ocean anywhere, ENH-2's "chain neighbour → neighbour until it lands at
+the ocean" never terminates, so the surviving open root is **adopted by the virtual ocean** (depression 0,
+`pit_elev=−∞`, already created unconditionally at `dephier.hpp:354`) as a child at spill elevation **+∞**
+— it never overflows. No real cell is dissolved; the ultimate low is simply the deepest *leaf*.
+
+Distributed form: one global all-reduce — "does the domain contain **any** ocean cell?" If none, adopt the
+dangling root(s) under ocean 0 at +∞ in the final PhaseC assembly. If the domain *does* contain ocean
+(Earth), behaviour is byte-for-byte unchanged — mode (b) is inert.
+
+**(a) Ocean-analog — zero code, documented alternative.** Relabel the single deepest cell (or a small
+region) as OCEAN and run unchanged: the throw is satisfied and the flood roots there. Correct when the
+ultimate low *is* the base level ("if Mars had a sea it would pool in Hellas"). **Caveat:** that cell
+becomes base level, so the deepest basin dissolves into ocean-draining terrain — Hellas / Challenger Deep
+is *erased* as a catalogued depression. Fine for an ocean-analog framing; wrong when the deepest basin is
+the object (seafloor). Kept as the quick path; (b) is the general resolution.
+
+### Why A, not the full base-level abstraction (Option B), now
+Option B = make base level a first-class configurable spec `{ocean cells | ultimate-low | none/closed |
+arbitrary datum z₀ | inverted}`. **Deferred, not rejected:** most of its extra reach is already free
+without an API (mode (a) is a relabel; inverted/seafloor is running on −DEM), so over A it mostly buys
+ergonomics, not capability — and it has **no concrete chosen-elevation consumer yet**, while costing more
+churn on the published `dephier.hpp`. Decisive point: **A→B is additive, not rework**, *provided* A's
+closure is written as "close against a base-level notion that today has two values (ocean cells |
+virtual-ultimate)," not as a hardcoded no-ocean special-case. Build it that way and B slots in later (add a
+datum case) with no back-tracking. Adopt B the moment a real chosen-elevation use appears (paleo-shoreline,
+reservoir/fill level, a WTM datum coupling). (Global spherical grids — the earlier "Option C" — are out of
+scope here; they belong to the spherical-grid tangent.)
+
+**Code gate (trace before calling A "small"):** the +∞ adoption is a **post-outlet-loop parent
+assignment** — there is no discovered OCEAN-endpoint outlet to trigger the `dephier.hpp:699` branch, so
+closure is a *new terminal step* after the outlet loop, not a change to that branch. Confirm the insertion
+trips no existing assertion. Two correctness items to verify, not assume:
+- **N disconnected closed components**, not one: each connected closed component yields exactly one
+  dangling root; adopt each under ocean 0.
+- **Volume at +∞ must resolve to the finite "fill the component to its own max" volume**, not infinity —
+  trace `CalculateMarginalVolumes` / `CalculateTotalVolumes`.
+
+### Acceptance criteria
+- A fully closed domain (no OCEAN/BOUNDARY — a single-bowl fractal, or a Mars-MOLA / seafloor subset)
+  builds without throwing under mode (b); every basin including the deepest is catalogued; each closed
+  component's tree has exactly one root (ocean 0) whose sole child is that component's top metadepression.
+- **Serial** closed-domain DH (`permit_without_baselevel_seed` + top-closure) is the differential oracle:
+  distributed == serial, tree + volumes bit-identical, exactly as for the ocean-seeded cases.
+- Earth-with-ocean is byte-for-byte unchanged (the all-reduce makes mode (b) inert).
+- Mode (a) documented as the quick ocean-analog path, with its deepest-basin-dissolves caveat stated.
+
+### Related
+- **Builds on ENH-2** (pit-only seeding, `permit_without_baselevel_seed`, the open-root definition).
+  Implement ENH-2 first; ENH-3 is the top-of-tree increment on it.
+- **Option B (configurable base level)** deferred pending a concrete chosen-elevation consumer; A is shaped
+  so B is additive.
+- Enables **seafloor depression studies** (root at the bathymetric minimum) — a distinct science use.
+- The **planetary / global-sphere** case additionally needs the spherical-grid tangent (no boundary; for
+  Mars, no ocean) — separate, later.
+
+---
+
 ## RESEARCH DIRECTION: lake ↔ drainage-network integration (CHONK-informed)
 
 **Status:** parked (2026-07-27). A research direction, not a bounded code task. Build when ready;
