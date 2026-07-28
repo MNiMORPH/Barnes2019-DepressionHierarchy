@@ -262,7 +262,7 @@ closure is written as "close against a base-level notion that today has two valu
 virtual-ultimate)," not as a hardcoded no-ocean special-case. Build it that way and B slots in later (add a
 datum case) with no back-tracking. Adopt B the moment a real chosen-elevation use appears (paleo-shoreline,
 reservoir/fill level, a WTM datum coupling). (Global spherical grids — the earlier "Option C" — are out of
-scope here; they belong to the spherical-grid tangent.)
+scope here; they belong to `GLOBAL_GRID_DESIGN.md`.)
 
 **Code gate (trace before calling A "small"):** the +∞ adoption is a **post-outlet-loop parent
 assignment** — there is no discovered OCEAN-endpoint outlet to trigger the `dephier.hpp:699` branch, so
@@ -288,7 +288,7 @@ trips no existing assertion. Two correctness items to verify, not assume:
 - **Option B (configurable base level)** deferred pending a concrete chosen-elevation consumer; A is shaped
   so B is additive.
 - Enables **seafloor depression studies** (root at the bathymetric minimum) — a distinct science use.
-- The **planetary / global-sphere** case additionally needs the spherical-grid tangent (no boundary; for
+- The **planetary / global-sphere** case additionally needs `GLOBAL_GRID_DESIGN.md` (no boundary; for
   Mars, no ocean) — separate, later.
 
 ---
@@ -344,25 +344,3 @@ and he is re-implementing CHONK's lake solver in that cleaner codebase. Our dist
 lake↔network machinery is a clean division of the four open items above.
 - Flowdir interface note: raw D8 flow accumulation is *already solved and parallel* — richdem's
   `parallel_d8_accum` (Barnes 2017) consumes our flowdirs directly; don't rebuild it.
-
----
-
-## PARKED TANGENT: DH on spherical / geographic grids
-
-**Status:** parked (2026-07-27, Wickert). For later. Relevant to the *actual* global-30″ goal — the
-current core is Cartesian, but a true global run is on a lat–lon (geographic) grid.
-
-Three things a spherical build must handle:
-1. **Periodic longitude.** The grid wraps at ±180°; the east and west edges are neighbours. Our seam/
-   tiling machinery already resolves vertical seams — a global wrap is essentially "one more seam" joining
-   column 0 to column W−1, so this may be a modest extension of the existing conduit/outlet/HandleEdge
-   passes rather than new machinery.
-2. **Latitude-varying cell geometry.** E–W cell width scales with cos(latitude); N–S ≈ constant. This
-   changes (a) cell **area** → Phase D marginal **volumes** (`dx·dy` per row, not constant — feeds the
-   already-distributed volume pass) and (b) any distance-weighted flow metric (D8 diagonal-vs-cardinal
-   weighting). The tree/labels are unaffected; volumes and metric-weighted routing are.
-3. **Pole singularity.** Meridians converge; the top/bottom rows are near-singular — the genuinely hard
-   part (cap, exclude, or a pole-aware topology).
-
-The tree topology is largely geometry-agnostic; the real work is volumes (per-row area), a periodic-x
-seam, and poles. Worth scoping against real GEBCO 30″ (which is geographic) before a production run.
