@@ -318,6 +318,39 @@ trips no existing assertion. Two correctness items to verify, not assume:
 
 ---
 
+## ENH-5: consolidate the triplicated outlet re-derivation into one shared scan
+
+**Status:** follow-up, identified 2026-07-28 while fixing the NoData-as-ocean inf bug (ENH-2). Not urgent
+— a robustness / maintainability item that removes a class of drift bug.
+
+**Type:** refactor / correctness-hardening.
+
+### Problem
+The tiled build re-derives its outlet set from the resolved label grid (rather than reusing PhaseAB's
+`tile.outlets` — see ENH-2's rationale for *why* it re-derives). But that scan is **triplicated**, three
+independent copies that must agree with nothing enforcing it:
+- `tools/dephier_stitch.cpp` — the `record()` intra + seam scans.
+- `tools/dephier_mpi.cpp` **oracle** — `reduce(odb, …)` intra + seam.
+- `tools/dephier_mpi.cpp` **distributed** — `reduce(myintra/myedgedb, …)` intra + seam.
+
+The NoData-as-ocean inf bug was the same `if(isNoData) continue` in **all three**; the fix had to be
+applied three times (`261bbcd` stitch, `a8ecd2e` mpi oracle + dist). Every future outlet-semantics change
+is a 3× edit and a standing drift risk. `DH_AUDIT_OUTLETS` (`1fba9f9`) catches drift between PhaseAB and
+the *stitch's* re-derivation at runtime, but it does not prevent the triplication.
+
+### Fix
+Extract the re-derivation into ONE shared helper (the way `dh_collapse.hpp` is shared), parameterized by a
+label accessor, an elevation accessor, a `skip(cell)` predicate (NoData-but-not-OCEAN), and the
+tile/seam iteration — so the stitch, the mpi oracle, and the mpi distributed path all call the same code.
+Then a fix or a semantic change happens once. Validate against the differential oracle exactly as now
+(0 regressions; full sweep + suite).
+
+### Related
+- Fixes the class the NoData bug (ENH-2) belonged to; all three already use the same `skip()` rule.
+- `DH_AUDIT_OUTLETS` then guards the seam-exchange path rather than three parallel implementations.
+
+---
+
 ## RESEARCH DIRECTION: lake ↔ drainage-network integration (CHONK-informed)
 
 **Status:** parked (2026-07-27). A research direction, not a bounded code task. Build when ready;
