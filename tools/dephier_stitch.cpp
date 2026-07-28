@@ -420,8 +420,13 @@ int main(int argc, char **argv){
     const auto pit_of = [&](const dh::DepressionHierarchy<float> &deps,
                             const rd::Array2D<dh_label_t> &lab, int x, int y, bool walk)->int{
       dh_label_t c = lab(x,y);
-      if(walk){ const float e=full(x,y); while(c!=OCEAN && e>deps[c].out_elev) c=deps[c].parent; }
-      if(c==OCEAN) return -1;
+      // NOTE: lab is in the pre-collapse label namespace, so a cell whose leaf was compacted away
+      // can carry a stale label >= deps.size(); bound the walk by range and depth so this diagnostic
+      // never runs off the end (it can then only mis-report, never hang/UB).
+      if(walk){ const float e=full(x,y);
+        for(std::size_t g=0; c!=OCEAN && c<deps.size() && e>deps[c].out_elev && g<=deps.size(); g++)
+          c=deps[c].parent; }
+      if(c==OCEAN || c>=deps.size()) return -1;
       if(walk && deps[c].lchild!=dh::NO_VALUE) return -2;   // meta: pit cell is order-dependent
       return (int)deps[c].pit_cell;
     };
@@ -438,6 +443,7 @@ int main(int argc, char **argv){
     const auto pxy = [&](const dh::DepressionHierarchy<float> &deps, dh_label_t c)->std::string{
       if(c==dh::NO_VALUE) return "-";
       if(c==OCEAN) return "OCEAN";
+      if(c>=deps.size()) return "stale";                 // stale pre-collapse label (see note above)
       if(deps[c].pit_cell==dh::NO_VALUE) return "meta(no-pit)";
       int px,py; full.iToxy(deps[c].pit_cell,px,py); std::ostringstream os;
       os<<"pit("<<px<<","<<py<<")"; return os.str();
@@ -446,7 +452,7 @@ int main(int argc, char **argv){
                                 const rd::Array2D<dh_label_t> &lab, int x, int y){
       std::cerr<<"    "<<tag<<" cell("<<x<<","<<y<<") elev="<<full(x,y)<<":\n";
       dh_label_t c = lab(x,y);
-      for(int depth=0; c!=OCEAN && depth<12; depth++){
+      for(int depth=0; c!=OCEAN && c<deps.size() && depth<12; depth++){
         const auto &d = deps[c];
         std::cerr<<"      "<<pxy(deps,c)<<" pit_elev="<<d.pit_elev<<" out_elev="<<d.out_elev
                  <<" lchild="<<pxy(deps,d.lchild)<<" rchild="<<pxy(deps,d.rchild)
@@ -463,12 +469,14 @@ int main(int argc, char **argv){
         dump_chain("STITCH", G, gLabel, x, y);
         // Full field set of the stitch node the cell lands in, and who references it.
         const dh_label_t c = gLabel(x,y);
-        const auto &d = G[c];
-        std::cerr<<"    STITCH node "<<c<<" "<<pxy(G,c)<<": parent="<<pxy(G,d.parent)
-                 <<" odep="<<pxy(G,d.odep)<<" geolink="<<pxy(G,d.geolink)
-                 <<" ocean_parent="<<d.ocean_parent<<" cc="<<d.cell_count<<" dv="<<d.dep_vol<<" ol={";
-        for(auto o: d.ocean_linked) std::cerr<<pxy(G,o)<<" ";
-        std::cerr<<"}\n";
+        if(c<G.size()){
+          const auto &d = G[c];
+          std::cerr<<"    STITCH node "<<c<<" "<<pxy(G,c)<<": parent="<<pxy(G,d.parent)
+                   <<" odep="<<pxy(G,d.odep)<<" geolink="<<pxy(G,d.geolink)
+                   <<" ocean_parent="<<d.ocean_parent<<" cc="<<d.cell_count<<" dv="<<d.dep_vol<<" ol={";
+          for(auto o: d.ocean_linked) std::cerr<<pxy(G,o)<<" ";
+          std::cerr<<"}\n";
+        } else std::cerr<<"    STITCH node "<<c<<" (stale pre-collapse label)\n";
         shown++;
       }
     }
