@@ -95,41 +95,39 @@ machinery and then discard it. Option 3 already bounds the problem, so this is s
 
 ## ENH-2: bowl-interior tiles have no base-level seed for PhaseAB
 
-**Status:** pit-only seeding IMPLEMENTED (2026-07-28, commits `523b3f6` core flag, `7c358ce` harness,
-`766a7bf` collapse, `263ab19` diagnostic guard) — but bit-identity is **INCOMPLETE**; the build no longer
-aborts, yet the tiled tree still differs from serial for most bowl-interior geometries, and a subset is
-outright wrong. Found 2026-07-27 while validating the MPI harness increment 1. Pre-existing — the
-in-process stitch has it too. At global 30″ a **guaranteed** case, not a rare one: large endorheic basins
-much bigger than a tile contain fully bowl-interior tiles (Caspian, Tarim, Chad, Altiplano, Great Basin).
-The first candidate fix below (open the seam as exterior) was implemented and **reverted** — it severs
-tile-spanning basins. The correct base fix is **pit-only seeding**; see Resolution.
+**Status:** **DONE (2026-07-28)** under the agreed acceptance bar — **correct volume + valid hierarchy**,
+NOT byte-identical-to-serial (Andy's scoping call 2026-07-28). Every bowl-interior tile that used to abort
+now builds pit-only with the right volume and a valid tree. Commits: `523b3f6` core flag, `7c358ce`
+harness, `766a7bf` collapse Pass B, `263ab19` diagnostic guard, `261bbcd` NoData-as-ocean outlet fix,
+`1fba9f9` `DH_AUDIT_OUTLETS`. At global 30″ this is a **guaranteed** case (large endorheic basins bigger
+than a tile — Caspian, Tarim, Chad, Altiplano, Great Basin). The first candidate fix (open the seam as
+exterior) was implemented and **reverted** (it severs tile-spanning basins); the correct base fix is
+**pit-only seeding**; see Resolution.
 
-### Implementation status vs serial (2026-07-28) — measured, NOT yet closed
-Exhaustive fixture sweep `kerry_test*/testdem* × all split columns` at `-9999` (a crude uniform ocean
-level — several fixtures then show *pre-existing* seeded DIFFERs unrelated to ENH-2; those are a sweep
-artifact, ignore). Of the **110** splits that used to ABORT (now build pit-only):
-- **7** bit-identical to serial (STITCH-MATCH). ✅
-- **69** finite volume, correct aggregates, but **tree shape differs** — the moat `cell_count` and the
-  ocean_linked overflow nesting reconnect differently across the seam than serial (a *different* artifact
-  class from the flat-straddle meta the collapse pass now handles). Cosmetic w.r.t. volume; fails byte-
-  identity.
-- **34** `stitch total_dep_vol = inf` — a real bug, but **PRE-EXISTING in the stitch, NOT caused by ENH-2**
-  (verified: the pre-ENH-2 code at `ddb3eca` also produces inf — `testdem8.dem 0 1`: serial=239, stitch=inf,
-  node counts match 3=3). It is an **intra-tile** failure: a basin bounded by NoData-as-ocean (these
-  fixtures use `NODATA_value=9`, so `ocean_labels` turns the 9-ring into OCEAN) links to ocean in serial
-  (`out=9`) but the tiled stitch leaves it a separate open root (`out=inf`) — no split even runs through it.
-  ENH-2 merely surfaces it in the `-9999` sweep by letting the bowl-interior tiles build. Fixing it is a
-  SEPARATE pre-existing-stitch task. `scratchpad/inf_cases.txt` lists the sweep cases; minimal repro
-  `testdem8.dem 0 1`.
+### Implementation status vs serial (2026-07-28) — MEASURED, bar MET
+Exhaustive fixture sweep `kerry_test*/testdem* × all split columns` at `-9999` (a crude uniform ocean level;
+several fixtures then show *pre-existing* seeded DIFFERs unrelated to ENH-2 — a sweep artifact, ignore). Of
+the **110** splits that used to ABORT (now build pit-only): **all 110 are volume-correct vs serial (0
+mismatches) and produce a valid tree** (canonicalize throws on a cycle/multi-parent; it never does). So the
+bar is met for every case. Byte-identity breakdown, for the record: 70 bit-identical (STITCH-MATCH); ~40
+differ ONLY in `ocean_linked` nesting order — the documented **PhaseCD tie-break / out_cell** class (changes
+serial output; already on Richard's review list), which the bar deems acceptable.
 
-**What landed and is validated (0 regressions vs the serial oracle on the full sweep):** the flag
-(`permit_without_baselevel_seed`), the harness passing it, the collapse `Pass B` meta-dissolve widening
-(+14 flat-straddle cases fixed, incl. seeded ones), and the divergence-dump bounds guard. **What remains:**
-(a) the 34 inf-volume cases — a **pre-existing** stitch bug (intra-tile NoData-as-ocean basin not linking to
-ocean), surfaced but not caused by ENH-2; fix as a separate task. (b) the 69 shape-only residuals — the
-actual ENH-2 bit-identity gap (bowl-interior moat/nesting reconnection), in scope only if byte-identity is
-required. **Open scoping question for Andy:** is byte-identical-to-serial the bar for bowl-interior tiles,
-or is correct-volume + valid-hierarchy enough? That decides whether (b) is in scope.
+**What landed and is validated (0 regressions vs the serial oracle on the full sweep):**
+- `permit_without_baselevel_seed` flag + harnesses passing it (bowl-interior tiles build instead of abort).
+- collapse `Pass B` meta-dissolve widening (+14 flat-straddle cases now bit-identical, incl. seeded ones).
+- divergence-dump bounds guard (latent hang/segfault on stale post-collapse labels).
+- **NoData-as-ocean outlet fix** (`261bbcd`): the re-derived outlet scan skipped all NoData cells, but
+  `ocean_labels` makes NoData OCEAN, so basin→NoData-ocean outlets were dropped → `inf` volume (34 cases).
+  **A PRE-EXISTING stitch bug** (reproduces on `ddb3eca`; minimal repro `testdem8.dem 0 1` → serial 239 /
+  stitch inf), surfaced but not caused by ENH-2. Fixed; all 34 now volume-correct. Trade-off: 2 kerry_test4
+  splits went MATCH→DIFFER, but audit-proven outlet-faithful and volume-correct — same tie-break class.
+- **`DH_AUDIT_OUTLETS`** debug flag (`1fba9f9`): diffs PhaseAB's `tile.outlets` against the re-derived
+  global set in real time, to catch future drift between the two outlet-discovery paths.
+
+**Remaining (out of scope under the agreed bar; documented for completeness):** exact serial `ocean_linked`
+nesting for the ~40 tie-affected cases = the PhaseCD tie-break/out_cell class. NOT a piecemeal fix — it
+changes serial output and is best handled as one effort with Richard. Tracked, not blocking.
 
 **Type:** correctness / robustness (tiling seeding).
 
