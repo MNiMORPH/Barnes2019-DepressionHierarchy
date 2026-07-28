@@ -113,6 +113,11 @@ bar is met for every case. Byte-identity breakdown, for the record: 70 bit-ident
 differ ONLY in `ocean_linked` nesting order — the documented **PhaseCD tie-break / out_cell** class (changes
 serial output; already on Richard's review list), which the bar deems acceptable.
 
+**MPI harness confirmed (2026-07-29):** the same fix went into `dephier_mpi.cpp` (`a8ecd2e`; its outlet
+re-derivation is a separate copy — see ENH-5), and a **full MPI sweep** (`dephier_mpi.exe`, all 335
+fixture×split cases) is **0 bad-volume, 0 error**: 73 MPI-TREE-MATCH, 262 DIFFER-but-volume-correct. So the
+real distributed build meets the bar too — not just the in-process stitch.
+
 **What landed and is validated (0 regressions vs the serial oracle on the full sweep):**
 - `permit_without_baselevel_seed` flag + harnesses passing it (bowl-interior tiles build instead of abort).
 - collapse `Pass B` meta-dissolve widening (+14 flat-straddle cases now bit-identical, incl. seeded ones).
