@@ -320,6 +320,22 @@ int main(int argc, char **argv){
   // keyed on the depression pair, keeping the lowest max-of-pair -- the serial PhaseB
   // rule. Intra-tile + cross-seam together cover every adjacency, so the result is
   // identical to a single global pass. ----
+  //
+  // WHY re-derive here instead of reusing PhaseAB's per-tile `tile.outlets` (this is NOT fluffy
+  // duplication -- it is load-bearing for the distributed build):
+  //   * PhaseAB found its outlets in each tile's PRE-conduit labels (BOUNDARY sentinels included).
+  //     The conduit pass then resolves every BOUNDARY cell to its true drain target, which changes
+  //     *which* depressions actually meet. Re-deriving from the RESOLVED labels captures that for
+  //     free; remapping `tile.outlets` through the resolution would be fiddly and error-prone.
+  //   * In the real MPI build each rank re-derives from ITS OWN resolved labels locally (dephier_mpi
+  //     does the same from glab_pc) -- no raw outlet set is shipped or merged. That locality is the
+  //     whole point; `tile.outlets` is deliberately dropped.
+  // THE COST (record it, so the risk is visible): this is a SECOND outlet-discovery path, and it must
+  // reproduce PhaseAB's semantics faithfully or the two drift. One drift was a real bug: a NoData cell
+  // is OCEAN (ocean_labels), so a basin->NoData-ocean adjacency is a genuine outlet; the scan used to
+  // `continue` on all NoData cells and drop it, leaving the basin unclosed (inf volume). The `skip()`
+  // below closes that gap (skip a cell only if NoData AND not OCEAN). A debug flag audits for further
+  // drift by diffing this set against PhaseAB's tile.outlets -- see DH_AUDIT_OUTLETS below.
   std::vector<dh::Outlet<float>> outlets;
   {
     std::map<std::pair<dh_label_t,dh_label_t>, std::pair<float,dh::flat_c_idx>> db;
@@ -334,14 +350,18 @@ int main(int argc, char **argv){
         db[{key.first,key.second}] = {oelev, ocell};
     };
 
+    // Skip a cell only if it is NoData AND not OCEAN. A NoData-as-OCEAN cell is a real base level, so
+    // its adjacency to a land depression is a genuine basin->ocean outlet that must be recorded.
+    const auto skip = [&](int x,int y){ return full.isNoData(x,y) && gLabel(x,y)!=OCEAN; };
+
     // Per-tile: adjacencies whose neighbour lies in the SAME tile.
     for(int y=0;y<full.height();y++)
       for(int x=0;x<full.width();x++){
-        if(full.isNoData(x,y)) continue;
+        if(skip(x,y)) continue;
         for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
           if(!dx && !dy) continue;
           int nx=x+dx, ny=y+dy;
-          if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
+          if(!full.inGrid(nx,ny) || skip(nx,ny)) continue;
           if(tile_of(nx)!=tile_of(x)) continue;   // cross-seam: handled below
           record(gLabel(x,y), gLabel(nx,ny), full(x,y), full.xyToI(x,y),
                                              full(nx,ny), full.xyToI(nx,ny));
@@ -353,9 +373,9 @@ int main(int argc, char **argv){
     for(size_t b=1;b+1<bounds.size();b++){
       const int cA=bounds[b]-1, cB=bounds[b];     // the two columns straddling the seam
       for(int y=0;y<full.height();y++){
-        if(full.isNoData(cA,y)) continue;
+        if(skip(cA,y)) continue;
         for(int ny=y-1;ny<=y+1;ny++){
-          if(ny<0 || ny>=full.height() || full.isNoData(cB,ny)) continue;
+          if(ny<0 || ny>=full.height() || skip(cB,ny)) continue;
           record(gLabel(cA,y), gLabel(cB,ny), full(cA,y), full.xyToI(cA,y),
                                               full(cB,ny), full.xyToI(cB,ny));
         }
