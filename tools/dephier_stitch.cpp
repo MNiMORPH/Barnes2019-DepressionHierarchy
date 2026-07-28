@@ -157,7 +157,9 @@ int main(int argc, char **argv){
       }
 
     tile.fd = rd::Array2D<int8_t>(tile.dem.width(), tile.dem.height(), rd::NO_FLOW);
-    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(tile.dem, tile.label, tile.fd, tile.deps, tile.outlets);
+    // A tile may be a bowl interior (no base-level seed); permit the pit-only flood. Its open
+    // top depression is closed later across the seam by HandleEdge + PhaseCD (ENH-2).
+    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(tile.dem, tile.label, tile.fd, tile.deps, tile.outlets, /*permit_without_baselevel_seed=*/true);
     tile.offset = next_offset;
     next_offset += tile.deps.size() - 1;
   }

@@ -227,7 +227,7 @@ int main(int argc, char **argv){
       }
     rd::Array2D<int8_t> fd(dem.width(), dem.height(), rd::NO_FLOW);
     dh::DepressionHierarchy<float> deps; std::vector<dh::Outlet<float>> outlets;
-    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem, label, fd, deps, outlets);
+    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
     oracle[t].label = std::move(label);
     oracle[t].fd    = std::move(fd);
     oracle[t].nboundary = nb;
@@ -401,7 +401,7 @@ int main(int argc, char **argv){
 
     rd::Array2D<int8_t> fd(dem.width(), dem.height(), rd::NO_FLOW);
     dh::DepressionHierarchy<float> deps; std::vector<dh::Outlet<float>> outlets;
-    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem, label, fd, deps, outlets);
+    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
 
     // Namespace remap (eng-doc component 6): gather per-tile depression counts to rank 0,
     // prefix-sum into global offsets, scatter each rank its offset. This is the shim analogue
