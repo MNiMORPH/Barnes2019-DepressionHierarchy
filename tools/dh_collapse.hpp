@@ -31,17 +31,19 @@ namespace dh = richdem::dephier;
 // A real depression's pit is a strict local minimum, so it never has a lower/equal
 // cross-tile neighbour -- the test has no false positives on genuine basins.
 //
-// Such artifacts appear in two forms, contracted differently (Pass A below):
-//   * ocean-linked splice -- the real basin lives in one tile as a node P; the seam
-//     manufactured an extra degenerate leaf ocean_linked into P. Drop the artifact and
-//     reattach its ocean_linked children to P. It holds no volume and its lone high
-//     cell is above P's outlet, so P's cell_count/dep_vol already match serial.
-//   * meta dissolve -- the basin's PIT straddles the seam, so it belongs to neither
-//     tile; the stitch rebuilds it as a meta over the two tile-half artifact leaves.
-//     That meta already carries the whole-basin aggregates, so dissolve it into one
-//     leaf and drop both halves. (In this column-split harness a pit straddles exactly
-//     one vertical seam -> two halves; a 2-D distributed build could split a corner
-//     pit N ways, which would need the recursive subtree-dissolve generalisation.)
+// Such artifacts appear in two forms, contracted differently (Passes A and B below):
+//   * ocean-linked splice (Pass A) -- the real basin lives in one tile as a node P; the seam
+//     manufactured an extra degenerate leaf, seam-adjacent (is_seam_artifact) and ocean_linked
+//     into P. Drop the artifact and reattach its ocean_linked children to P. It holds no volume
+//     and its lone high cell is above P's outlet, so P's cell_count/dep_vol already match serial.
+//   * meta dissolve (Pass B) -- the basin's FLOOR straddles the seam, so the flat belongs to
+//     neither tile; the stitch rebuilds it as a meta over the two tile-half leaves, which are
+//     degenerate leaves whose pits fall in DIFFERENT tiles. (This straddle test, not the pit's
+//     seam-adjacency, is what identifies the halves -- a flat's fragment pit can land in the tile
+//     interior.) That meta already carries the whole-basin aggregates, so dissolve it into one
+//     leaf and drop both halves. (In this column-split harness a flat straddles exactly one
+//     vertical seam -> two halves; a 2-D distributed build could split a corner flat N ways,
+//     which would need the recursive subtree-dissolve generalisation.)
 // Then labels are compacted. Grid-locality (pit cell, tile of a column) uses the DEM
 // and tile bounds -- the 1-cell perimeter strips a distributed build already
 // exchanges. Returns the number of artifacts contracted. O(#depressions) + O(boundary).
@@ -51,13 +53,13 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
   using dh::dh_label_t;
   const dh_label_t N = G.size();
   std::vector<char> dead(N, 0);
-  int contracted = 0, binary_skipped = 0;
+  int contracted = 0;
 
   const auto tile_of = [&](int x){ int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; };
 
   // is_seam_artifact(i): is leaf i one the tiling manufactured? -- degenerate
-  // (pit_elev==out_elev) with a cross-tile D8 neighbour at or below its pit (the
-  // escape the local flood could not see). See the criterion above.
+  // (pit_elev==out_elev) with a cross-tile D8 neighbour at or below its pit (the escape the local
+  // flood could not see). Used ONLY by Pass A (ocean-linked splice); Pass B uses a straddle test.
   const auto is_seam_artifact = [&](dh_label_t i)->bool {
     const auto &d = G[i];
     if(d.lchild!=dh::NO_VALUE || d.rchild!=dh::NO_VALUE) return false;  // leaves only
@@ -74,50 +76,59 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
     return false;
   };
 
-  // Pass A -- mark artifacts for contraction. A seam-cut basin appears in one of two
-  // forms depending on where its pit sits relative to the seam:
-  //   * ocean-linked splice -- the real basin lives in one tile as a separate node P;
-  //     the seam manufactured an extra degenerate leaf ocean_linked into P. Drop the
-  //     artifact; its own ocean_linked children reattach to P.
-  //   * meta dissolve -- the basin's PIT straddles the seam, so it has no home in
-  //     either tile; the stitch rebuilds it as a meta over the two tile-half artifact
-  //     leaves. That meta already carries the whole-basin aggregates (out_elev/
-  //     cell_count/dep_vol == serial's), so dissolve it into one leaf and drop both
-  //     halves. (Volume is conserved either way -- the refinement is exact.)
+  // A real zero-height leaf, regardless of where its pit sits relative to a seam. (The
+  // meta-dissolve reads seam-membership from the two halves straddling the seam, not from the
+  // pit's seam-adjacency, so it does NOT use is_seam_artifact -- see Pass B.)
+  const auto is_degenerate_leaf = [&](dh_label_t i)->bool {
+    const auto &d = G[i];
+    return d.lchild==dh::NO_VALUE && d.rchild==dh::NO_VALUE   // leaf
+        && d.pit_cell!=dh::NO_VALUE                           // real pit, not the ocean
+        && d.pit_elev==d.out_elev;                            // zero-height
+  };
+  const auto pit_tile = [&](dh_label_t i){ int x,y; full.iToxy(G[i].pit_cell,x,y); return tile_of(x); };
+
+  // Pass A -- ocean-linked splice. The real basin lives in one tile as a node P; the seam
+  // manufactured an extra degenerate leaf, seam-adjacent (is_seam_artifact) and ocean_linked into
+  // P. Drop the artifact; its own ocean_linked children reattach to the live container via resolve()
+  // during compaction. (This is the form where the basin's pit did NOT straddle the seam.)
   for(dh_label_t i=1;i<N;i++){                        // skip ocean (node 0)
     if(dead[i]) continue;
     if(!is_seam_artifact(i)) continue;
-
     const dh_label_t P = G[i].parent;
     const auto &pol = G[P].ocean_linked;
     if(std::find(pol.begin(), pol.end(), i)!=pol.end()){
-      dead[i] = 1;                                     // ocean-linked splice
+      dead[i] = 1;
       contracted++;
-      continue;
     }
-
-    // Binary child of meta P: dissolve P iff BOTH its children are seam artifacts
-    // (the two halves of a pit-straddles-seam basin).
-    const dh_label_t a = G[P].lchild, b = G[P].rchild;
-    if(a!=dh::NO_VALUE && b!=dh::NO_VALUE && is_seam_artifact(a) && is_seam_artifact(b)){
-      // The meta becomes the basin's single leaf. Its pit is the flood's seed cell --
-      // the higher-index of the tied-lowest halves (the flood pops highest-index
-      // first) -- at the shared floor elevation; its aggregates are already serial's.
-      const dh_label_t keep = (G[a].pit_cell>=G[b].pit_cell) ? a : b;
-      G[P].pit_cell = G[keep].pit_cell;
-      G[P].pit_elev = std::min(G[a].pit_elev, G[b].pit_elev);
-      G[P].lchild   = dh::NO_VALUE;
-      G[P].rchild   = dh::NO_VALUE;
-      dead[a] = 1; dead[b] = 1;
-      contracted += 2;
-      continue;
-    }
-
-    std::cerr<<"collapse: seam artifact "<<i<<" under meta "<<P
-             <<" is not a two-halves dissolve (unhandled form); skipped\n";
-    binary_skipped++;
   }
-  (void)binary_skipped;
+
+  // Pass B -- meta dissolve. A meta whose two children are both degenerate leaves whose pits lie in
+  // DIFFERENT tiles is a single serial flat basin the seam split into halves: the basin's floor
+  // straddles the seam, so it has no home in either tile and the stitch rebuilt it as a meta over the
+  // two tile-half leaves. Seam-membership is read from the halves straddling the seam, NOT the pit's
+  // seam-adjacency -- so this also catches a flat whose fragment pit landed in the tile interior (the
+  // pit-only is_seam_artifact test missed exactly that; see ENH-2). The meta already carries the
+  // whole-basin aggregates (out_elev/cell_count/dep_vol == serial's), so dissolve it into one leaf and
+  // drop both halves; volume is conserved, the refinement is exact. Ascending order dissolves nested
+  // metas (a flat cut by several seams) bottom-up. Two zero-volume degenerate leaves in different
+  // tiles under one meta cannot arise without a seam, so there are no false positives on genuine basins.
+  for(dh_label_t P=1;P<N;P++){                        // skip ocean (node 0)
+    if(dead[P]) continue;
+    const dh_label_t a = G[P].lchild, b = G[P].rchild;
+    if(a==dh::NO_VALUE || b==dh::NO_VALUE) continue;  // P is not a meta
+    if(dead[a] || dead[b]) continue;
+    if(!is_degenerate_leaf(a) || !is_degenerate_leaf(b)) continue;
+    if(pit_tile(a)==pit_tile(b)) continue;            // the two halves must straddle a seam
+    // The meta becomes the basin's single leaf. Its pit is the flood's seed cell -- the higher-index
+    // of the tied-lowest halves (the flood pops highest-index first) -- at the shared floor elevation.
+    const dh_label_t keep = (G[a].pit_cell>=G[b].pit_cell) ? a : b;
+    G[P].pit_cell = G[keep].pit_cell;
+    G[P].pit_elev = std::min(G[a].pit_elev, G[b].pit_elev);
+    G[P].lchild   = dh::NO_VALUE;
+    G[P].rchild   = dh::NO_VALUE;
+    dead[a] = 1; dead[b] = 1;
+    contracted += 2;
+  }
   if(contracted==0) return 0;
 
   // resolve(x) -- follow the parent chain up until a LIVE node. Artifacts are always
