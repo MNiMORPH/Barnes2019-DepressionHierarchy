@@ -273,13 +273,21 @@ std::ostream& operator<<(std::ostream &out, const DepressionHierarchy<elev_t> &d
 //per tile and reconcile outlets across tiles before the grid-free hierarchy
 //assembly. `depressions` and `outlets` are outputs and must be empty on entry;
 //`outlets` is left UNSORTED (the assembly phase sorts it).
+//`permit_without_baselevel_seed` (default false): normally a tile with no exterior
+//(OCEAN/BOUNDARY) cell has no base-level seed and is an error. A distributed caller
+//passes true for a bowl-interior tile -- the interior of a closed bowl whose rim lies
+//in a neighbour tile -- which legitimately has only pit seeds. The flood then runs
+//pit-only and the tile's top depression comes out "open" (no OCEAN-endpoint outlet);
+//the caller supplies the missing outlet afterwards, across the seam or by adopting the
+//open root under a virtual base level. See ENHANCEMENTS.md ENH-2/ENH-3.
 template<class elev_t, Topology topo>
 void GetDepressionHierarchyPhaseAB(
   const Array2D<elev_t>       &dem,
   Array2D<dh_label_t>         &label,
   Array2D<int8_t>             &flowdirs,
   DepressionHierarchy<elev_t> &depressions,
-  std::vector<Outlet<elev_t>> &outlets
+  std::vector<Outlet<elev_t>> &outlets,
+  const bool                   permit_without_baselevel_seed = false
 ){
   ProgressBar progress;
   Timer timer_dephier;
@@ -347,7 +355,11 @@ void GetDepressionHierarchyPhaseAB(
     }
   }
 
-  if(exterior_cells==0){
+  //No exterior (ocean/BOUNDARY) cell means no base-level seed. This is an error unless the
+  //caller has opted into a pit-only flood for a bowl-interior tile (see the parameter note).
+  //The flood below still runs -- it is driven by the pit seeds found next -- and the top
+  //depression is left open for the caller to close.
+  if(exterior_cells==0 && !permit_without_baselevel_seed){
     throw std::runtime_error("No OCEAN or BOUNDARY cells found, could not make a DepressionHierarchy!");
   }
 
