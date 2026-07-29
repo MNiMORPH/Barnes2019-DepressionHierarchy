@@ -420,10 +420,21 @@ collapse fix keeps the *current* `ocean_labels` semantics (NoData = ocean) — c
 
 Also added this session: the **node count is now an explicit decomposition-correctness diagnostic**
 (`0371dec`, `STITCH-`/`MPI-DECOMP-CORRECT`/`-INCORRECT`). Because the tree is split-invariant, an unequal
-node count is a definitive symptom of an incorrect decomposition, cleanly separated from the accepted
-tie-break nesting noise (which keeps node count constant). It confirms the Corsica class is now split-
-invariant, and flags ~38 volume-correct-but-not-yet-split-invariant fixtures (extra zero-vol artifacts the
-collapse still misses + the PhaseCD merge-order/tie-break class) as the remaining split-invariance work.
+node count is a NECESSARY-condition symptom that the split changed the tree. It flags TWO things (do NOT
+read it as cleanly isolating decomposition bugs — an earlier framing that was wrong): (1) genuine seam
+artifacts the collapse missed (spurious extra depressions — real bugs); (2) the STRUCTURAL sub-class of the
+PhaseCD tie-break — at a TIED outlet, two basins rebuilt as a META vs one ocean_linked into the other (same
+depressions + volume, but meta-vs-ocean_linked moves the node count; kerry_test2 4 vs 3). Only the pure-
+ORDERING tie-break sub-class preserves node count (DIFFER but DECOMP-CORRECT, e.g. kerry_test4 3/8).
+Progress this session on the split-invariance program the diagnostic measures:
+- **Corsica coastal artifact fixed** (`4c3edcb`, the NoData-as-ocean escape above).
+- **testdem8/kerry9 rim-fragment artifacts fixed** (`2e86ab7`, collapse Pass B2: dissolve a meta over {real
+  basin leaf, one degenerate seam-artifact rim fragment} — the complement of Pass B's floor straddle).
+- **Remaining (DECOMP-INCORRECT, ~35 fixtures, all volume-correct + valid-tree):** mostly the meta-vs-
+  ocean_linked tie-break class (class (2) above; appears at ALL splits, Richard-coordinated) + a few
+  seam-dependent extra-artifact cases at split 10 (kerry10/11/12: degenerate zero-vol leaves with cc>1
+  nested under metas with ocean_linked siblings — a tangled topology Pass B2 does not match; a broader
+  collapse generalization with higher over-contraction risk, deferred). None is a volume regression.
 
 ### Related
 - Surfaced by the Corsica example (README). The (a) sentinel-as-elevation is in shared core → Richard.
