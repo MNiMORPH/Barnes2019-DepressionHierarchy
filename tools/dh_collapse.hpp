@@ -47,9 +47,15 @@ namespace dh = richdem::dephier;
 // Then labels are compacted. Grid-locality (pit cell, tile of a column) uses the DEM
 // and tile bounds -- the 1-cell perimeter strips a distributed build already
 // exchanges. Returns the number of artifacts contracted. O(#depressions) + O(boundary).
+// out_map (optional): if non-null, filled with the pre-collapse -> post-collapse label remap (size = the
+// ORIGINAL G.size()), so a caller can carry a pre-collapse label grid into the compacted namespace. A dead
+// (dissolved) node maps to the live container that absorbed it; a survivor maps to its dense id. Identity
+// when nothing is contracted. Lets the containment cc-pass (dephier_stitch) attribute cells drained to a
+// dissolved seam-artifact pit onto the surviving leaf. Unused by dephier_mpi (default nullptr).
 inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
                                  const rd::Array2D<float> &full,
-                                 const std::vector<int> &bounds){
+                                 const std::vector<int> &bounds,
+                                 std::vector<dh::dh_label_t> *out_map = nullptr){
   using dh::dh_label_t;
   const dh_label_t N = G.size();
   std::vector<char> dead(N, 0);
@@ -179,7 +185,10 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
     std::cerr<<"WARNING: collapse dissolved "<<meta_over_halves<<" meta-over-halves seam artifact(s) "
              <<"(seam-dependent; should retire via early split-invariant flat unification)\n";
 
-  if(contracted==0) return 0;
+  if(contracted==0){
+    if(out_map){ out_map->resize(N); for(dh_label_t i=0;i<N;i++) (*out_map)[i]=i; }   // identity
+    return 0;
+  }
 
   // resolve(x) -- follow the parent chain up until a LIVE node. Artifacts are always
   // ocean_linked to their parent, so the parent chain is the ocean_linked spine; a
@@ -218,6 +227,11 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
     for(const dh_label_t child : G[P].ocean_linked)
       if(!dead[child])
         H[perm[resolve(P)]].ocean_linked.push_back(perm[child]);
+
+  if(out_map){                                     // pre-collapse i -> post-collapse dense id (dead -> container)
+    out_map->resize(N);
+    for(dh_label_t i=0;i<N;i++) (*out_map)[i] = perm[resolve(i)];
+  }
 
   G = std::move(H);
   return contracted;
