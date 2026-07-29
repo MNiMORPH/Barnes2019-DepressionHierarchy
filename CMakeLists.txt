@@ -105,6 +105,11 @@ if(USE_GDAL AND GDAL_FOUND)
   add_executable(dephier_stitch.exe tools/dephier_stitch.cpp)
   target_link_libraries(dephier_stitch.exe PRIVATE dephier richdem)
 
+  # ROAD A proof: a full pit-up replay of the flood's cell-labelling, compared partition-wise to serial over
+  # every land cell (SPLIT_INVARIANT_FLATS_PLAN.md). Exits nonzero on PARTITION-DIFFER (a CTest guard).
+  add_executable(flat_partition_replay_proof.exe tools/flat_partition_replay_proof.cpp)
+  target_link_libraries(flat_partition_replay_proof.exe PRIVATE dephier richdem)
+
   # Boundary-behavior tests (PARALLEL_DEPHIER_PLAN.md section 6, differential oracle).
   # The tiled stitch must reproduce the serial DepressionHierarchy -- tree AND per-cell
   # flowdirs -- bit-identically. The `seam` fixture puts a depression pit straddling the
@@ -172,6 +177,14 @@ if(USE_GDAL AND GDAL_FOUND)
   add_test(NAME mpi_tiebreak_volume
            COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test11.dem 0 7)
   set_tests_properties(mpi_tiebreak_volume PROPERTIES PASS_REGULAR_EXPRESSION "MPI-VOL-MATCH ")
+
+  # ROAD A proof/guard: the flat-label PARTITION replay must reproduce serial's cell->leaf partition EXACTLY
+  # (proven on 49 DEMs). It is the rule dephier_stitch's DH_FLAT_PARTITION_REPLAY relies on; if the flood/
+  # radix pop order ever drifts, this bites before the stitch silently stops matching serial. kerry_test10 is
+  # a rich multi-basin fixture; the tool exits nonzero on any PARTITION-DIFFER.
+  add_test(NAME flat_partition_replay_proof
+           COMMAND flat_partition_replay_proof.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test10.dem 0)
+  set_tests_properties(flat_partition_replay_proof PROPERTIES PASS_REGULAR_EXPRESSION "PARTITION-MATCH")
 
   install(TARGETS dephier.exe DESTINATION bin)
   install(TARGETS dephier_paper_tests.exe DESTINATION bin)
