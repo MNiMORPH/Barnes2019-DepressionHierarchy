@@ -139,11 +139,11 @@ if(USE_GDAL AND GDAL_FOUND)
   set_tests_properties(mpi_coastal_escape PROPERTIES PASS_REGULAR_EXPRESSION "MPI-TREE-MATCH ")
 
   # The node-count decomposition diagnostic must report DECOMP-CORRECT even when the full
-  # signature DIFFERs on the accepted tie-break class -- kerry_test4 split 3 is STITCH-DIFFER
+  # signature DIFFERs on the accepted tie-break class -- kerry_test4 split 2 is STITCH-DIFFER
   # but node count 6==6. Locks the diagnostic's separation of a real decomposition error from
   # the meta-order tie-break noise.
   add_test(NAME stitch_decomp_diagnostic
-           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test4.dem 0 3)
+           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test4.dem 0 2)
   set_tests_properties(stitch_decomp_diagnostic PROPERTIES PASS_REGULAR_EXPRESSION "STITCH-DECOMP-CORRECT ")
 
   # Volume-correctness bar (VOL-MATCH) for cases that are NOT bit-identical to serial: the tie-break class

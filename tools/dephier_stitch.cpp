@@ -347,7 +347,13 @@ int main(int argc, char **argv){
       if(ea>=eb){ oelev=ea; ocell=ca; } else { oelev=eb; ocell=cb; }
       const auto key = std::minmax(la, lb);
       const auto it = db.find({key.first,key.second});
-      if(it==db.end() || oelev < it->second.first)
+      // Keep the pair's LOWEST out_elev; break an elevation TIE by the LOWER out_cell. The tie-break
+      // is load-bearing: this scan visits all intra-tile pairs THEN all seam pairs, so a pair whose
+      // lowest-elevation outlet sits on a seam could be first recorded from a higher-index intra cell
+      // and, without the tie, never replaced -- an order-dependent out_cell that diverges from serial's
+      // row-major first-seen (= lowest index). The explicit lower-cell rule makes it order-independent
+      // and serial-identical (fixes kerry_test4 splits 3/8/9; matches the mpi reduce()).
+      if(it==db.end() || oelev < it->second.first || (oelev==it->second.first && ocell < it->second.second))
         db[{key.first,key.second}] = {oelev, ocell};
     };
 
