@@ -430,11 +430,16 @@ Progress this session on the split-invariance program the diagnostic measures:
 - **Corsica coastal artifact fixed** (`4c3edcb`, the NoData-as-ocean escape above).
 - **testdem8/kerry9 rim-fragment artifacts fixed** (`2e86ab7`, collapse Pass B2: dissolve a meta over {real
   basin leaf, one degenerate seam-artifact rim fragment} — the complement of Pass B's floor straddle).
-- **Remaining (DECOMP-INCORRECT, ~35 fixtures, all volume-correct + valid-tree):** mostly the meta-vs-
-  ocean_linked tie-break class (class (2) above; appears at ALL splits, Richard-coordinated) + a few
-  seam-dependent extra-artifact cases at split 10 (kerry10/11/12: degenerate zero-vol leaves with cc>1
-  nested under metas with ocean_linked siblings — a tangled topology Pass B2 does not match; a broader
-  collapse generalization with higher over-contraction risk, deferred). None is a volume regression.
+- **Remaining (DECOMP-INCORRECT, ~35 fixtures, all volume-correct + valid-tree):** the meta-vs-ocean_linked
+  tie-break class (class (2) above; appears at ALL splits, Richard-coordinated). A careful pass on the
+  seam-dependent split-10 outliers (kerry10/11/12) found they are NOT a further collapse gap: the surviving
+  seam artifacts are CELL-ASSIGNMENT differences (an artifact degen leaf carries cc=4 where serial's legit
+  degen carries cc=1, and the parent meta's own aggregate is already wrong, e.g. cc 21 vs 18), so the
+  tree-only collapse cannot repair them — it can dissolve nodes but not move cells between sibling basins.
+  Same root as the tie-break class (the seam partitions a flat's cells differently than serial's flood at a
+  tie); fix belongs upstream at the seam flat/tie partitioning, with the Richard-coordinated effort — NOT
+  more collapse passes. The collapse (Passes A/B/B2) is complete for the tree-structural artifact classes.
+  None is a volume regression.
 
 ### Related
 - Surfaced by the Corsica example (README). The (a) sentinel-as-elevation is in shared core → Richard.
