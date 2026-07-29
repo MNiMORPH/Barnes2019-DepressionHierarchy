@@ -531,7 +531,7 @@ Serial's flat label is order-DEPENDENT (highest-index-first flood pop order), so
 
 **Status:** **DONE 2026-07-29; made the PRIMARY (and only) path 2026-07-30** (GitHub issue #4, MNiMORPH
 fork). `DH_FLAT_PARTITION_REPLAY` now drives the fully per-rank chained-halo replay; the historical rank-0
-whole-grid gather ("v1") was RETIRED (`DH_FLAT_REPLAY_V2` kept as an accepted alias). Bit-identical to serial
+whole-grid gather ("v1") was RETIRED (single flag, no v2 alias). Bit-identical to serial
 on **every valid case swept: 384/384 single+multi-seam tilings (2-6
 tiles), 0 volume errors**. (A first sweep reported "11 misses"; those were a SWEEP BUG — it fed every DEM
 `ocean_level=0`, but `kerry_test.dem`'s base level is `-9999` and it has NO cell at 0, so at ocean 0 there

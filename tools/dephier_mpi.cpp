@@ -367,9 +367,9 @@ int main(int argc, char **argv){
   // Flat-label reconciliation (ENH-8): reproduce serial's EXACT flat-label partition across seams so the tiled
   // build is bit-identical to serial (not just volume-correct). Implemented as the fully per-rank chained-halo
   // replay; the historical rank-0 whole-grid gather ("v1") was retired 2026-07-30 -- this path is strictly
-  // more correct (it fixed v1's findSet(NO_VALUE) crash on some tilings) AND lighter (O(N/P) vs O(N)). Both
-  // env names are accepted for back-compat. Default OFF => unchanged byte-for-byte.
-  const bool flat_replay = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr || std::getenv("DH_FLAT_REPLAY_V2")!=nullptr;
+  // more correct (it fixed v1's findSet(NO_VALUE) crash on some tilings) AND lighter (O(N/P) vs O(N)).
+  // Default OFF => unchanged byte-for-byte.
+  const bool flat_replay = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr;
 
   auto rank_main = [&](){
     const int r  = c::CommRank();
