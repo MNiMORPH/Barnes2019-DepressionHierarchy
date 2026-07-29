@@ -1,12 +1,46 @@
 # Plan: flag-gated split-invariant flats (GitHub #3 / ENH-7)
 
-> **STATUS 2026-07-29:** Source-1 SHIPPED (`010c4a4`) + collapse retirement warning (`3e28f7c`). The
-> flag-gated early floor-flat unification drives the seam-dependent meta-over-halves collapse to ZERO
-> (Andy's goal), keeps invariant cases invariant, default off byte-identical (23/23). **Source 2 (divide-
-> cell ties between adjacent depressions) is deliberately NOT pursued** (Andy). Follow-ons: (a) distribute
-> the unification via ENH-1's seam-exchange; (b) promote env flag → CLI flag; (c) once early unification
-> catches all seam-split flats, DELETE the now-retired collapse Pass B/B2. The two failed post-hoc
-> approaches (S1-S4 full trace) are superseded; WIP saved in scratchpad.
+> **GOAL RAISED (Andy, 2026-07-29):** aim for FULL serial↔parallel IDENTITY (bit-identical canonical
+> signature), not merely volume-correct or split-invariant. PRINCIPLE (verbatim, "definitely remember"):
+> **"They're complementary and both necessary: the collapse gets the right set of depressions; source 2
+> gets the right cells into each."** For IDENTITY, each tie-break must reproduce SERIAL's specific choice.
+>
+> **COMMITTED & SAFE:** source-1 early floor-flat unification (`010c4a4`, flag DH_SPLIT_INVARIANT_FLATS) +
+> collapse meta-over-halves retirement warning (`3e28f7c`). Default OFF byte-identical (suite 23/23). The
+> flag drives the seam-dependent meta-over-halves collapse (Pass B/B2) to 0 on floor-straddle flats. Also
+> committed this arc: STITCH-SIG split-invariance metric + `tools/check_split_invariance.sh` (`98c7613`).
+>
+> **FULL SPLIT-INVARIANCE MAP (flag OFF):** 8/28 fixtures SPLIT-VARIANT, ALL volume-correct:
+> kerry_test 1,2,4,5,9,10,11,12. Source-1 flag alone makes NONE of them invariant (variance dominated by
+> the cell-assignment / structure levers below, not the collapse-work retirement).
+>
+> **SOURCE-2 ATTEMPTS — BOTH BROKE BROAD (the recurring trap):**
+> - per-cell steepest-descent (scratchpad `dephier_stitch_source2_percell_wip.cpp`): split sill-flats →
+>   kerry_test2 split-invariant but SERIAL-WRONG (cc 28/8 vs 32/4).
+> - sill-region = lowest-adjacent-lower (scratchpad `dephier_stitch_source1_plus_sill_wip.cpp`): kerry_test2
+>   RIGHT (cc 32/4, split-invariant) BUT (a)-sweep broke 11 bit-identical cases + corrupted volume in 11
+>   (testdem8 → NaN). ROOT: treated NoData-ocean as −∞; a basin RIM adjacent to NoData-ocean got sent to
+>   ocean, severing the basin → open depression → NaN. Serial keeps NoData-ocean at its SENTINEL elevation.
+>
+> **GENERAL SOLUTION (designed, Andy-informed, NOT yet built):** the relabel-before-outlets lets a
+> labelling error ripple into STRUCTURE (a mis-labelled cell changes outlets → tree → NaN). So SEPARATE:
+> (1) keep the collapse-corrected tree as the STRUCTURE (do not re-derive outlets from relabelled cells);
+> (2) fix CELLS as a STRUCTURE-PRESERVING pass — recompute only marginal volumes (cell_count/dep_vol) on the
+> frozen tree, assigning each cell to its CONTAINING leaf = the leaf it reaches by DETERMINISTIC drainage
+> (ENH-1 flat flowdirs + steepest descent), with OCEAN AT ITS FLOOD ELEVATION (not −∞). Frozen tree ⇒ a
+> labelling error can only mis-COUNT, never spawn a NaN basin. One containment rule subsumes floor/sill/rim;
+> reuses ENH-1 flowdirs. LEAVES the meta-vs-ocean_linked difference (kerry_test2 residual) as a SEPARATE
+> third lever (a PhaseCD binarization tie), untouched by the cell pass.
+>
+> **VERIFICATION PROTOCOL (Andy's "a then b", earned the hard way):** before trusting ANY source-2 attempt,
+> run the (a) broad sweep first — flag ON vs true-OFF (`env -u`!), require broke-a-match=0, VOL-DIFFER=0,
+> 0 crashes across all fixtures×splits. Only then chase serial identity (b). Narrow-green (kerry_test2) ≠
+> done. Every geometric shortcut so far passed narrow and broke broad — get the sweep before claiming.
+>
+> **PROCESS NOTE:** a premature "success ✓" is a destabilising false anchor; state what was tested AND what
+> wasn't; hold green PROVISIONAL until verified at the real scope; ask "what would break this?" and check it
+> FIRST so reversals die in my verification, not Andy's model. And: a partial step is a KEPT rung — don't
+> reset to zero when it's not the whole staircase.
 
 
 ## Goal
