@@ -124,9 +124,8 @@ struct DistSlice {
   template<class Ar> void serialize(Ar &ar){ ar(w,h,nboundary,ndep,offset,label,glab,glab_pc,fd,gfix); }
 };
 
-// ENH-8 v2 wire types. Band: a contiguous run of global columns [g0,g0+n) with elevation, ocean flag, and
-// pre-reconciliation glab -- relayed between neighbours to grow a rank's flat-replay halo. RbLeaf: the
-// O(#deps) old-label -> survivor-label reduction gathered to rank 0 for the same compaction v1 does.
+// ENH-8 wire types. Band: a contiguous run of global columns [g0,g0+n) with elevation, ocean flag, and
+// pre-reconciliation glab -- relayed between neighbours to grow a rank's flat-replay halo. RbLeaf below.
 struct Band   { int32_t g0=0, n=0; std::vector<float> e; std::vector<uint8_t> o; std::vector<dh_label_t> g;
                 template<class Ar> void serialize(Ar &ar){ ar(g0,n,e,o,g); } };
 // RbLeaf: for the stitch-style canonicalisation -- pairs (rb, leaf) where rb is a replay basin's PIT global
@@ -359,17 +358,18 @@ int main(int argc, char **argv){
          TAG_DISTSLICE=16,                                    // gather per-cell grid slices to rank 0 (MPI verify)
          TAG_FLAT_L=17, TAG_FLAT_R=18,                        // ENH-1 per-rank flats: seam field columns (L/R dir)
          TAG_FLAT_CHG=19, TAG_FLAT_CONT=20,                   // ENH-1 per-rank flats: convergence gather / continue
-         TAG_FLABEL_G=21, TAG_FLABEL_S=22,                    // ENH-8 v1: flat-label glab_pc gather / scatter
-         TAG_HALO_L=23, TAG_HALO_R=24,                        // ENH-8 v2: chained halo band (L/R dir; dem+glab+ocean)
-         TAG_HALO_CHG=25, TAG_HALO_CONT=26,                   // ENH-8 v2: convergence all-reduce (2-stable)
-         TAG_REP=27, TAG_FLREL=28 };                          // ENH-8 v2: rb->leaf survivor gather/bcast; used-label + densify map
+         TAG_HALO_L=23, TAG_HALO_R=24,                        // ENH-8: chained halo band (L/R dir; dem+glab+ocean)
+         TAG_HALO_CHG=25, TAG_HALO_CONT=26,                   // ENH-8: convergence all-reduce (2-stable)
+         TAG_REP=27, TAG_FLREL=28 };                          // ENH-8: rb->leaf survivor gather/bcast; used-label + densify map
   std::map<OutKey,OutVal>         outlet_db_dist;             // rank 0's merged outlet DB (read in verify)
   dh::DepressionHierarchy<float>  Gdist;                      // rank 0's assembled global hierarchy (leaves)
   dh_label_t                      n_global_r0 = 0;            // rank 0's global depression count (incl. ocean)
-  // Flat-label reconciliation (ENH-8 v1): reproduce serial's exact flat-label partition across seams so the
-  // tiled build is bit-identical to serial (not just volume-correct). Flag-gated; default OFF => unchanged.
-  const bool flat_replay_v2 = std::getenv("DH_FLAT_REPLAY_V2")!=nullptr;   // ENH-8 v2: per-rank chained-halo replay
-  const bool flat_replay    = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr || flat_replay_v2;
+  // Flat-label reconciliation (ENH-8): reproduce serial's EXACT flat-label partition across seams so the tiled
+  // build is bit-identical to serial (not just volume-correct). Implemented as the fully per-rank chained-halo
+  // replay; the historical rank-0 whole-grid gather ("v1") was retired 2026-07-30 -- this path is strictly
+  // more correct (it fixed v1's findSet(NO_VALUE) crash on some tilings) AND lighter (O(N/P) vs O(N)). Both
+  // env names are accepted for back-compat. Default OFF => unchanged byte-for-byte.
+  const bool flat_replay = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr || std::getenv("DH_FLAT_REPLAY_V2")!=nullptr;
 
   auto rank_main = [&](){
     const int r  = c::CommRank();
@@ -528,90 +528,22 @@ int main(int argc, char **argv){
     rd::Array2D<dh_label_t> glab_pc = glab;
     for(const auto &c2 : myresolved) glab_pc(c2.gx-x0, c2.gy) = c2.label;
 
-    // ---- FLAT-LABEL RECONCILIATION (flag-gated; v1 rank-0 gather-resolve-scatter; ENH-8) ----
+    // ---- FLAT-LABEL RECONCILIATION (flag-gated; ENH-8) ----
     // The per-tile flood labels a seam-straddling flat's cells inconsistently across the seam; reconcile
-    // glab_pc to serial's exact partition (the replay) so outlets/PhaseCD build serial's tree. v1: gather
-    // glab_pc to rank 0 (which also has `full`), correct there, scatter back. STAGE 1 = no-op round-trip
-    // (validates the gather/scatter plumbing leaves the baseline unchanged); the replay lands in stage 2.
+    // glab_pc to serial's EXACT partition (the pit-index flood replay) so the outlet scan + PhaseCD build
+    // serial's tree, not just a volume-correct one. Fully per-rank: each rank replays the partition over an
+    // ADAPTIVE halo it fetches from neighbours by a chained (systolic) column exchange -- a band advances one
+    // tile per round, so a halo wider than one tile is relayed THROUGH the intervening ranks. Grow until the
+    // OWNED pit-labels are stable for TWO consecutive rounds (one is a coincidence on a wide flat) OR the halo
+    // cap. Then map each owned cell to serial's partition using the stitch's proven canonicalisation (survivor
+    // = min global leaf label among leaves whose pit lies in the basin + a true-pit stamp) and reduce the
+    // O(#deps) survivor map to rank 0. No rank reads a foreign tile interior -> footprint O(N/P)+O(cap*bnd).
     std::vector<dh_label_t> fl_relabel;   // (rank 0) old global label -> dense survivor id, or NO_VALUE if dropped
     dh_label_t              fl_ndense=0;   // (rank 0) compacted node count (survivors + ocean)
-    std::map<dh_label_t,int64_t> fl_pitstamp;  // (rank 0, v2) survivor global label -> true pit global cell (stitch-style stamp)
-    if(flat_replay && !flat_replay_v2){
-      std::vector<dh_label_t> myslice(w*H);
-      for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++) myslice[y*w+lx]=glab_pc(lx,y);
-      std::vector<dh_label_t> mycorr;
-      if(r==0){
-        rd::Array2D<dh_label_t> G(W,H,OCEAN);
-        const auto place=[&](int tt,const std::vector<dh_label_t>&v){ const int a=bounds[tt],b=bounds[tt+1],ww=b-a;
-          for(int y=0;y<H;y++) for(int x=a;x<b;x++) G(x,y)=v[y*ww+(x-a)]; };
-        place(0,myslice);
-        for(int t=1;t<ntiles;t++){ std::vector<dh_label_t> v; c::CommRecv(v,t,TAG_FLABEL_G); place(t,v); }
-
-        // STAGE 2: pit-index replay over the full grid (rank 0 has `full`); each cell's corrected label is
-        // the depression label at its basin's PIT cell -- unifying a seam-split straddling basin to the one
-        // survivor (the leaf whose pit_cell IS that global pit). Non-straddling basins are unchanged.
-        rd::Array2D<dh_label_t> pit(W,H,dh::NO_DEP);
-        {
-          std::map<float,std::vector<long>> bk;
-          const auto isoc=[&](int x,int y){ return full.isNoData(x,y)||full(x,y)==ocean_level; };
-          const auto push=[&](int x,int y){ bk[full(x,y)].push_back((long)y*W+x); };
-          for(int y=0;y<H;y++) for(int x=0;x<W;x++){
-            if(isoc(x,y)){ pit(x,y)=OCEAN; push(x,y); continue; }
-            const float e=full(x,y); bool lower=false;
-            for(int dy=-1;dy<=1&&!lower;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=x+dx,ny=y+dy;
-              if(full.inGrid(nx,ny)&&full(nx,ny)<e){ lower=true; break; } }
-            if(!lower) push(x,y);
-          }
-          while(!bk.empty()){ auto it=bk.begin(); const float e=it->first; std::vector<long> cur=std::move(it->second); bk.erase(it);
-            std::sort(cur.begin(),cur.end());
-            while(!cur.empty()){ const long ci=cur.back(); cur.pop_back(); const int cx=ci%W,cy=ci/W;
-              dh_label_t cl=pit(cx,cy); if(cl==dh::NO_DEP){ cl=(dh_label_t)ci; pit(cx,cy)=cl; }
-              for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=cx+dx,ny=cy+dy;
-                if(!full.inGrid(nx,ny)||pit(nx,ny)!=dh::NO_DEP) continue;
-                pit(nx,ny)=cl; if(full(nx,ny)==e) cur.push_back((long)ny*W+nx); else bk[full(nx,ny)].push_back((long)ny*W+nx); } }
-          }
-        }
-        rd::Array2D<dh_label_t> Gc(W,H,OCEAN);
-        for(int y=0;y<H;y++) for(int x=0;x<W;x++){
-          const dh_label_t P=pit(x,y);
-          if(P==OCEAN || (long)P>=(long)W*H){ Gc(x,y)=OCEAN; continue; }     // replay: drains to sea -> OCEAN
-          Gc(x,y)=G((int)(P%W),(int)(P/W));                                  // label at the basin's pit cell
-        }
-
-        // STAGE 3 (compact, like the stitch): a straddling basin's two halves unified to one survivor, so the
-        // other half's leaf is now EMPTY -- drop it. rep[L] = the survivor of L (rep[survivor]==survivor);
-        // dense-renumber survivors; densify Gc; publish fl_relabel/fl_ndense for the leaf gather to drop the
-        // emptied leaf records and size Gdist. Ocean node (0) always kept.
-        std::vector<dh_label_t> rep(n_global_r0, dh::NO_VALUE);
-        for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(G(x,y)!=OCEAN) rep[G(x,y)]=Gc(x,y);
-        std::vector<dh_label_t> dense(n_global_r0, dh::NO_VALUE); dense[0]=0; dh_label_t nd=1;
-        for(dh_label_t L=1;L<n_global_r0;L++) if(rep[L]==L) dense[L]=nd++;
-        fl_ndense=nd;
-        fl_relabel.assign(n_global_r0, dh::NO_VALUE); fl_relabel[0]=0;
-        for(dh_label_t L=1;L<n_global_r0;L++) if(rep[L]==L) fl_relabel[L]=dense[L];
-        for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(Gc(x,y)!=OCEAN) Gc(x,y)=dense[Gc(x,y)];
-
-        for(int t=1;t<ntiles;t++){ const int a=bounds[t],b=bounds[t+1],ww=b-a; std::vector<dh_label_t> s(ww*H);
-          for(int y=0;y<H;y++) for(int x=a;x<b;x++) s[y*ww+(x-a)]=Gc(x,y); c::CommSend(s,t,TAG_FLABEL_S); }
-        mycorr.resize(w*H); for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++) mycorr[y*w+lx]=Gc(x0+lx,y);
-      } else {
-        c::CommSend(myslice,0,TAG_FLABEL_G);
-        c::CommRecv(mycorr, 0,TAG_FLABEL_S);
-      }
-      for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++) glab_pc(lx,y)=mycorr[y*w+lx];
-    }
-
-    // ---- FLAT-LABEL RECONCILIATION v2 (fully per-rank; ENH-8 v2) ----
-    // Same result as v1 but with NO rank-0 whole-grid gather. Each rank replays serial's pit-index flood
-    // partition over an ADAPTIVE halo it fetches from neighbours by a chained (systolic) column exchange -- a
-    // band advances one tile per round, so a halo wider than one tile is relayed through the intervening
-    // ranks. Grow until the OWNED pit-labels are stable for TWO consecutive rounds (one is a coincidence on a
-    // wide flat) OR the halo cap. Then map each owned cell to the pre-reconciliation glab_pc AT its basin pit
-    // (carried in the halo) = the survivor label; reduce the O(#deps) old->survivor map to rank 0 for the same
-    // compaction v1 does. No rank reads a foreign tile interior -> footprint O(N/P)+O(cap*boundary).
-    if(flat_replay_v2){
+    std::map<dh_label_t,int64_t> fl_pitstamp;  // (rank 0) survivor global label -> true pit global cell (stitch-style stamp)
+    if(flat_replay){
       const int cap = std::min(halo_cap, W);          // cap columns per side; default (INT_MAX)->W = adaptive/unbounded
-      rd::Array2D<dh_label_t> gc_owned_v2(w,H,OCEAN);   // survivor label per owned cell
+      rd::Array2D<dh_label_t> gc_owned(w,H,OCEAN);   // survivor label per owned cell
 
       // Per-column store keyed by GLOBAL column: owned columns seeded; halo columns appended as relays arrive.
       std::map<int,std::vector<float>>      colE;      // elevation
@@ -722,12 +654,12 @@ int main(int argc, char **argv){
       std::set<dh_label_t> used_local;
       for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++){
         const int gx=x0+lx;
-        if(colO.at(gx)[y]){ gc_owned_v2(lx,y)=OCEAN; continue; }
+        if(colO.at(gx)[y]){ gc_owned(lx,y)=OCEAN; continue; }
         const dh_label_t Pl=finalPv[(size_t)(gx-finalLw)*H+y];
         dh_label_t s;
         if(Pl==OCEAN || (long)Pl>=(long)W*H) s=OCEAN;
         else { auto it=survmap.find((int64_t)Pl); s = (it!=survmap.end()) ? it->second : glab_pc(lx,y); }
-        gc_owned_v2(lx,y)=s;
+        gc_owned(lx,y)=s;
         if(s!=OCEAN) used_local.insert(s);
       }
       // STEP D: OR the used-label sets to rank 0; dense-renumber survivors; broadcast the densify map.
@@ -747,7 +679,7 @@ int main(int argc, char **argv){
       } else { c::CommSend(usedvec, 0, TAG_FLREL); c::CommRecv(fl_full, 0, TAG_FLREL); }
       // STEP E: densify owned glab_pc into the survivor namespace.
       for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++){
-        const dh_label_t s=gc_owned_v2(lx,y);
+        const dh_label_t s=gc_owned(lx,y);
         glab_pc(lx,y) = (s==OCEAN) ? OCEAN : fl_full[s];
       }
     }
@@ -831,7 +763,7 @@ int main(int argc, char **argv){
         dh_label_t nl = flat_replay ? fl_relabel[d.dep_label] : d.dep_label;
         if(nl==dh::NO_VALUE) continue;                            // emptied leaf: dropped
         auto dd=d; dd.dep_label=nl;
-        if(flat_replay_v2){ auto it=fl_pitstamp.find(d.dep_label);   // stamp survivor with the basin's TRUE pit
+        if(flat_replay){ auto it=fl_pitstamp.find(d.dep_label);   // stamp survivor with the basin's TRUE pit
           if(it!=fl_pitstamp.end()){ const int64_t rb=it->second; int px,py; full.iToxy(rb,px,py);
             dd.pit_cell=(dh::flat_c_idx)rb; dd.pit_elev=full(px,py); } }
         Gdist[nl]=dd; } };
