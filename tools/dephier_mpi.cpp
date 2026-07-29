@@ -859,6 +859,16 @@ int main(int argc, char **argv){
   std::cout<<(decomp_ok ? "MPI-DECOMP-CORRECT " : "MPI-DECOMP-INCORRECT ")<<in_name
            <<" ranks="<<ntiles<<" nodes(serial="<<iv_s.n_nodes<<" dist="<<iv_d.n_nodes<<")\n";
 
+  // Volume-correctness verdict (VOL-MATCH/VOL-DIFFER): total depression volume vs serial -- the acceptance
+  // bar for cases NOT bit-identical to serial (bowl-interior ENH-2 splits, the tie-break class): they are
+  // volume-correct + valid-tree by design even when the tree DIFFERs. Small relative tolerance absorbs the
+  // distributed PhaseD's per-rank summation order; an open depression (inf) or a lost basin -> DIFFER.
+  const double v_s = iv_s.total_dep_vol, v_d = iv_d.total_dep_vol;
+  const bool vol_ok = std::isfinite(v_s) && std::isfinite(v_d) &&
+                      std::fabs(v_d - v_s) <= 1e-6 * std::max(1.0, std::fabs(v_s));
+  std::cout<<(vol_ok ? "MPI-VOL-MATCH " : "MPI-VOL-DIFFER ")<<in_name
+           <<" ranks="<<ntiles<<" total_dep_vol(serial="<<v_s<<" dist="<<v_d<<")\n";
+
   // ---- flowdir check: each rank now resolves ITS flats per-rank (ENH-1, resolve_flat_flowdirs_rank in
   // rank_main above) using a 1-column seam exchange + convergence all-reduce -- so no rank ever holds a
   // full-grid field. Here we only ASSEMBLE the per-rank results for the differential check; the flat pass

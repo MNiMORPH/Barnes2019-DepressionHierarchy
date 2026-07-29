@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <string>
@@ -470,6 +471,18 @@ int main(int argc, char **argv){
   const bool decomp_ok = (iv_stitch.n_nodes == iv_serial.n_nodes);
   std::cout<<(decomp_ok ? "STITCH-DECOMP-CORRECT " : "STITCH-DECOMP-INCORRECT ")<<in_name
            <<" splits="<<argv[3]<<" nodes(serial="<<iv_serial.n_nodes<<" stitch="<<iv_stitch.n_nodes<<")\n";
+
+  // Volume-correctness verdict (VOL-MATCH/VOL-DIFFER): total depression volume vs serial. This is the
+  // acceptance bar for cases that are NOT bit-identical to serial -- the bowl-interior (ENH-2) splits and
+  // the tie-break class are volume-correct + valid-tree by design even when the tree signature DIFFERs, so
+  // STITCH-MATCH can't assert them but this can. A small relative tolerance absorbs FP summation-order
+  // differences (the distributed PhaseD sums per-rank partials in a different order than serial's single
+  // pass); an open depression (total_dep_vol=inf) or a lost/merged basin makes the gap non-trivial -> DIFFER.
+  const double v_s = iv_serial.total_dep_vol, v_d = iv_stitch.total_dep_vol;
+  const bool vol_ok = std::isfinite(v_s) && std::isfinite(v_d) &&
+                      std::fabs(v_d - v_s) <= 1e-6 * std::max(1.0, std::fabs(v_s));
+  std::cout<<(vol_ok ? "STITCH-VOL-MATCH " : "STITCH-VOL-DIFFER ")<<in_name
+           <<" splits="<<argv[3]<<" total_dep_vol(serial="<<v_s<<" stitch="<<v_d<<")\n";
 
   if(!ok){
     // Localize the divergence. `pit_of` identifies the depression a cell belongs to
