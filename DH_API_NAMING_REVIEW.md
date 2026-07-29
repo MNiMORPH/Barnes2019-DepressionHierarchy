@@ -63,8 +63,19 @@ two one-call helpers would read worse).
 |---|---|---|
 | `GetDepressionHierarchyPhaseAB` (`dephier.hpp:285`) | paper A+B+C (flood + outlet discovery) | `FloodAndAssignDepressions` |
 | `GetDepressionHierarchyPhaseC` (`:653`) | paper D (hierarchy construction) | `ConstructHierarchy` |
-| `GetDepressionHierarchyPhaseCD` (`:825`) | paper D + §6.4 volumes (convenience combo) | `ConstructHierarchyAndVolumes`, or drop it |
+| `GetDepressionHierarchyPhaseCD` (`:825`) | paper D + §6.4 volumes (central-only convenience) | `ConstructHierarchyAndVolumes` (keep) |
 | `GetDepressionHierarchy` (`:849`) | Richard's one-call wrapper (preserved) | **leave alone** — his interface + the WTM drop-in target |
+
+**Why the repeated stem is correct, not a smell (verified 2026-07-30).** `ConstructHierarchy` (`PhaseC`) is a
+**primitive both paths use**; `ConstructHierarchyAndVolumes` (`PhaseCD`) is the **central path re-bundling**
+that primitive with the two volume calls. The split is load-bearing: the distributed build (`dephier_mpi`)
+calls `ConstructHierarchy` alone on rank 0 (`:792`), then *reimplements* the marginal-volume walk per-rank
+and reduces it (`:804–818`) before a central `CalculateTotalVolumes` (`:819`) — it never calls the combo.
+So `PhaseCD`'s only callers are the two **central/whole-grid** paths: the serial `GetDepressionHierarchy`
+wrapper (`:857`) and the in-process `dephier_stitch` oracle (`:518`). The shared `ConstructHierarchy` stem
+honestly names the shared primitive; keep the combo (it is not dead, and dropping it would only inline three
+calls at two central sites for no gain). Its comment can say "centralized convenience" to signal it is not
+the distributed path.
 
 ## The tool helpers
 
@@ -117,7 +128,8 @@ not behavior; do it deliberately, not as a drive-by.
 
 1. **Rename the core phase functions to behavior; paper letters to comments; do not re-carve.**
    `PhaseAB`→`FloodAndAssignDepressions`, `PhaseC`→`ConstructHierarchy`, `PhaseCD`→
-   `ConstructHierarchyAndVolumes` (or drop). Keep `GetDepressionHierarchy`, keep the volume names. These
+   `ConstructHierarchyAndVolumes` (keep — the central-only convenience over the shared `ConstructHierarchy`
+   primitive; see the phase table's note). Keep `GetDepressionHierarchy`, keep the volume names. These
    names are ours (`849578b`/`1714c53`), so free to do now; they ride the eventual Richard PR for his
    blessing, with no "rename his interface" hazard.
 2. **Rename the `resolve_flat_flowdirs*` family on a consistent axis; drop "option2/3".** All six live;
