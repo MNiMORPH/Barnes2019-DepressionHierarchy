@@ -529,9 +529,10 @@ Serial's flat label is order-DEPENDENT (highest-index-first flood pop order), so
 
 ## ENH-8: distribute the flat-label REPLAY per-rank ("v2", fully O(cap·boundary))
 
-**Status:** **DONE 2026-07-29** (GitHub issue #4, MNiMORPH fork). Implemented as `DH_FLAT_REPLAY_V2` in
-`dephier_mpi.cpp` (commit adding the fully per-rank path; v1 `DH_FLAT_PARTITION_REPLAY` untouched and still
-available). Bit-identical to serial on **every valid case swept: 384/384 single+multi-seam tilings (2-6
+**Status:** **DONE 2026-07-29; made the PRIMARY (and only) path 2026-07-30** (GitHub issue #4, MNiMORPH
+fork). `DH_FLAT_PARTITION_REPLAY` now drives the fully per-rank chained-halo replay; the historical rank-0
+whole-grid gather ("v1") was RETIRED (`DH_FLAT_REPLAY_V2` kept as an accepted alias). Bit-identical to serial
+on **every valid case swept: 384/384 single+multi-seam tilings (2-6
 tiles), 0 volume errors**. (A first sweep reported "11 misses"; those were a SWEEP BUG — it fed every DEM
 `ocean_level=0`, but `kerry_test.dem`'s base level is `-9999` and it has NO cell at 0, so at ocean 0 there
 is no base level and the UNTILED serial build aborts too, correctly. At its proper level `-9999` all 11
@@ -540,11 +541,11 @@ Validated under **real mpirun at 2/5 processes**. CTests `mpi_flat_replay_v2{,_c
 **v2 turned out STRICTLY MORE CORRECT than v1**, not merely lighter: adopting the stitch's proven
 canonicalisation (survivor = min global leaf label among leaves whose pit lies in the basin + a true-pit
 stamp, `dephier_stitch.cpp` rb2leaf) in place of v1's `glab(pit)` rule fixes tilings where v1 CRASHED
-(`findSet(NO_VALUE)` in PhaseC) -- e.g. `kerry_test10` split 23, `kerry_test4` split 4. That v1 crash is a
-latent pre-existing bug uncovered by the exhaustive v2 sweep; **v1 should be switched to the same rule**
-(the whole-grid replay makes it a one-line change of the survivor pick + pit stamp) or simply retired in
-favour of v2. A halo cap smaller than a flat degrades to a valid (VOL-MATCH) non-identical partition, not a
-crash (the documented fallback).
+(`findSet(NO_VALUE)` in PhaseC) -- e.g. `kerry_test10` split 23, `kerry_test4` split 4. That v1 crash was a
+latent pre-existing bug uncovered by the exhaustive v2 sweep; rather than carry a second (buggy) copy of the
+rule, v1 was **retired in favour of v2** (2026-07-30) -- the whole-grid witness of the same rule is
+`dephier_stitch.cpp` (107/107), so no cross-validation is lost. A halo cap smaller than a flat degrades to a
+valid (VOL-MATCH) non-identical partition, not a crash (the documented fallback).
 
 **Type:** performance / footprint -- and, as built, a correctness improvement over v1.
 
