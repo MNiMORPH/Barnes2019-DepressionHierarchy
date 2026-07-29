@@ -475,8 +475,8 @@ permanent. Only needed if we ever want the distributed build's LABEL set (which 
 belongs to) to be split-invariant — the current bar is volume-correct + valid-tree, which does NOT require
 it.
 
-**PROTOTYPE MEASURED (2026-07-29, `flat_relabel_prototype.exe`, commit `c263e61`) — the cost is ~ZERO, not
-"changes serial output" as first assumed.** A geometry-deterministic rule (each flat cell → the nearest
+**PROTOTYPE MEASURED (2026-07-29, `flat_relabel_prototype.exe`, commit `c263e61`; tool since removed —
+finding recorded here) — the cost is ~ZERO, not "changes serial output" as first assumed.** A geometry-deterministic rule (each flat cell → the nearest
 depression pit over same-elevation D8 adjacency, tiebreak lower pit index) reproduces serial's flood labels
 with **0 changes on every covered flat cell across all `test_cases`** (ocean 0). Serial's priority flood
 already labels flat floors by nearest-pit, so the split-invariant geometric rule *is* what serial computes
