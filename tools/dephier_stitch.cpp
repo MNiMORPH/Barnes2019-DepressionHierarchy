@@ -457,6 +457,16 @@ int main(int argc, char **argv){
   const bool ok = (sig_stitch==sig_serial);
   std::cout<<(ok ? "STITCH-MATCH " : "STITCH-DIFFER ")<<in_name<<" splits="<<argv[3]<<"\n";
 
+  // Decomposition-correctness diagnostic: the NODE COUNT. The depression tree is split-invariant -- a
+  // correct build has the same depressions no matter where the seams fall -- so an unequal node count is a
+  // definitive symptom of an INCORRECT decomposition (a dropped/merged basin, or a spurious seam artifact
+  // the collapse pass missed). It is NECESSARY but weaker than the canonical signature: a signature diff
+  // with EQUAL node count is the accepted PhaseCD tie-break / ocean_linked nesting class (same depressions,
+  // reshuffled). So node count isolates decomposition correctness from that acceptable tie-break noise.
+  const bool decomp_ok = (iv_stitch.n_nodes == iv_serial.n_nodes);
+  std::cout<<(decomp_ok ? "STITCH-DECOMP-CORRECT " : "STITCH-DECOMP-INCORRECT ")<<in_name
+           <<" splits="<<argv[3]<<" nodes(serial="<<iv_serial.n_nodes<<" stitch="<<iv_stitch.n_nodes<<")\n";
+
   if(!ok){
     // Localize the divergence. `pit_of` identifies the depression a cell belongs to
     // by that depression's pit cell (label-namespace-independent). raw (walk=false):
