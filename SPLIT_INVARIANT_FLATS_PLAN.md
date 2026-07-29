@@ -1,5 +1,94 @@
 # Plan: flag-gated split-invariant flats (GitHub #3 / ENH-7)
 
+> **ROAD A — flat-label PARTITION replay: rule DERIVED from the flood + (partially) VALIDATED (2026-07-29).**
+> Andy chose Road A (reproduce serial's flat-label partition locally, serial untouched). Derived the exact
+> rule from the flood (`dephier.hpp:481-536`) + the fork's radix_heap tie-break (`radix_heap.hpp:391-399`:
+> bucket-0 sorted ASC by cell index, consumed `pop_back` ⇒ equal-elevation cells pop HIGHEST-INDEX first;
+> same-elevation cells labelled mid-bucket are appended and popped LIFO). Rule for a connected same-elevation
+> region: every lower bucket drains before bucket e, so each region cell with a strictly-lower neighbour is
+> SEEDED (before bucket e) by the label of its lowest-(elev), highest-(index) strictly-lower neighbour —
+> **OCEAN counted at its dem elevation** (an ocean cell is a seed popped at its dem value; this is the ocean
+> handling the earlier sill attempt got wrong); bucket e then propagates into the `is_flat` interior
+> (no strictly-lower neighbour) HIGHEST-INDEX-first + LIFO. A closed floor-flat (no lower exit) = a pit,
+> highest-index cell seeds a fresh basin (= source-1's domain).
+>
+> **CLEAN PROOF DONE (`scratchpad/flat_full_replay.cpp`): the rule reproduces serial's label partition
+> EXACTLY over EVERY land cell — 49 DEMs, 0 partition-differ.** (24 kerry/testdem fixtures + Corsica 14 064
+> land cells + 24 adversarial fractals, sizes 120/200, β 1.3–2.2, seeds 1/4/7/11.) The proof is a full
+> pit-up replay faithful to the flood: seeds = every OCEAN cell + every land cell with NO strictly-lower
+> neighbour (the land_seed / pit set, `dephier.hpp:412` — INCLUDES all is_flat interiors), each pushed at
+> its dem elevation; process buckets elev-ASC, within a bucket sort ASC by index and consume `pop_back`
+> (highest-index first) with same-elevation labels appended + popped LIFO; a popped NO_DEP cell becomes a
+> new pit. Compared namespace-free (bijection s_label↔replay) over all land cells. The KEY correction over
+> the first isolated test: ALL is_flat cells are land_seeds already in the PQ, so a flat interior pops as a
+> NEW pit only if still NO_DEP when popped (highest-index-first) — the first test's "seed-then-propagate"
+> missed this, producing the closed-floor-flat confound; the full replay eliminates it. So the flat-partition
+> rule + dynamics are now FULLY understood and TESTED, with a correct reference implementation to build from.
+>
+> **INTEGRATION (i) BUILT + VALIDATED (2026-07-29): `DH_FLAT_PARTITION_REPLAY`.** Full-grid replay (§above)
+> overwrites gLabel with serial's partition mapped onto G's existing leaves (each replay-basin → the min-label
+> G-leaf whose pit falls in it; several leaves in one basin = a seam-split → they merge, SUBSUMING source-1),
+> stamping each canonical leaf with the replay's OWN pit cell (= serial's pit, so pit_elev — which IS in the
+> signature — matches; fixed testdem8 sp3). Then COLLAPSE is RETIRED under the flag: the correct partition
+> means outlets→PhaseCD build serial's tree with no artifacts and the compact drops emptied leaves, so the
+> collapse's seam-dependent meta-over-halves would only DISSOLVE REAL structure (measured: kerry_test9 sp7
+> merged two genuine basins until the collapse was skipped). **Sweep (107 fixture×split cases): STITCH-MATCH
+> 73→79 (+6, ZERO broke), 0 VOL-DIFFER, 0 orphan cells, 0 DECOMP regressions; default OFF byte-identical
+> (suite 23/23).** The residual DIFFERs are now the SEPARATE levers: pure meta-nesting/outlet-ordering (DIFFER
+> but DECOMP-CORRECT — the leaf cell_counts already match serial, e.g. kerry_test5 sp3) and meta-vs-ocean_linked
+> (DECOMP-INCORRECT) — both Richard-coordinated, NOT cell-assignment. The cell-assignment DIFFER class is
+> CLOSED by the partition fix. Open design Qs (for Andy): (1) the replay subsumes source-1 — unify/deprecate
+> the DH_SPLIT_INVARIANT_FLATS flag? (2) collapse retirement is now real under replay — path to default? (3)
+> the superseded containment cc-pass code (DH_CONTAINMENT_CCPASS + collapse out_map) — remove now?
+>
+> **INTEGRATION DECISION (proof now DE-RISKS option i):** (i) run the replay full-grid over gLabel
+> (source-1 style, flag-gated) — now JUSTIFIED: proven to reproduce serial's partition exactly, so it cannot
+> break non-seam cells; fastest way to MEASURE whether the partition fix (with source-1) collapses the
+> cell-assignment DIFFER class in the stitch. Distributable later, same status as source-1. (ii) target ONLY
+> seam-straddling flats via ENH-1 seam-exchange — the honest distributed form; the propagation is sequential
+> (highest-index LIFO, new-pit-on-pop), so it replays the flood ORDER across the seam (bounded per flat,
+> global-row-major index is consistent across tiles) rather than independent relaxation rounds like ENH-1's
+> flat FLOWDIRS. RECOMMEND: do (i) in the stitch next to confirm the identity gain, then (ii) as the
+> distributed engineering. Tools kept: `flat_full_replay.cpp` (the proof/reference), `flat_replay_test.cpp`.
+
+> **FINDING (2026-07-29) — the containment cc-pass via flowdir-tracing is the WRONG mechanism; the residual
+> is a FLOOD-MEMBERSHIP tie on flats.** Built the cc-pass (flag `DH_CONTAINMENT_CCPASS`, post-collapse,
+> structure-preserving: re-derive each cell's leaf by tracing the serial-identical fixed flowdirs `gFix` down
+> to a pit, then recompute ONLY marginal+total volumes on the FROZEN tree; collapse extended with an optional
+> pre→post label `out_map` to carry dissolved-pit cells to their surviving leaf). It did NOT reconcile:
+> kerry_test9 sp7 meta 35→36 (serial 29); kerry_test10 sp5 fixed the top meta (195→**197** ✓) but **EMPTIED a
+> zero-height flat leaf** `(6,6,20,0)→(6,6,0,0)` and mis-moved others `(8,8,49)→(8,8,26)`. VOL stayed MATCH
+> (structure-preservation held — no NaN), but SIG did not converge.
+>
+> **ROOT (mechanistic, decisive):** a cell has TWO different "assignments" that COINCIDE on strict slopes but
+> DIVERGE on flats: (1) DRAINAGE — where its flowdir sends water (a sill/through-flat's flat-flowdirs point at
+> the EXIT, out to a lower basin); (2) MEMBERSHIP — which depression Priority-Flood LABELS it into (the basin
+> whose wavefront claims it first, by (elevation, index) pop-order). Serial's leaf label = MEMBERSHIP.
+> Flowdir-tracing computes DRAINAGE. So the cc-pass empties every zero-height flat leaf `(e,e,·,0)`: its cells
+> drain out (→ neighbour pit) but serial COUNTS them in the flat. This is the SAME rock the source-2 per-cell
+> steepest-descent hit ("split sill-flats, kerry_test2 cc 28/8 vs 32/4"), now proven from the attribution
+> side. And attribution can't sidestep it: for a sill cell `my_elev==out_elev`, the walk-up `while(my_elev >
+> out_elev)` does NOT fire, so the cell is pinned to whatever leaf it's LABELLED with — the partition directly
+> sets the zero-height leaves' cell_count. No attribution trick recovers it; you must match serial's flat
+> partition. **Kept as a measured negative; not reverted yet (Andy).** Diagnostics added and worth keeping:
+> `DH_DUMP_FDDIFF` (flowdir divergences — 100% seam-confined, mostly flats) and `DH_CCPASS_CEIL` (gFix-trace
+> vs serial-trace terminal-pit mismatch = the drainage residual; 0 on kerry_test9 sp7, i.e. drainage was
+> perfect there yet SIG still differed → proof the block is membership/structure, not drainage).
+>
+> **DEEPER APPROACH TO RECONCILE (the real lever):** reproduce serial's deterministic flat-LABEL PARTITION,
+> not a flowdir trace. Source-1 already handles the trivial case (a FLOOR flat — all cells below their
+> neighbours, no competition → one basin). The unsolved case is the SILL/through-flat: cells at their own
+> elevation with equal-elevation exits to ≥2 basins, which serial partitions by flood pop-order (a geodesic
+> Voronoi from the competing spill cells, tie-broken by index). Roads: **(A)** compute that partition locally
+> per connected flat — deterministic multi-source BFS from the flat's basin-adjacent perimeter, ordered by
+> (distance, global cell index) to match the flood, distributable via ENH-1 seam-exchange on the LABEL field
+> (this is "source 2 as a label relaxation," the principled form; the earlier sill attempt failed only
+> because its rule — lowest-adjacent-lower, ocean as −∞ — was the WRONG partition, not because partitioning is
+> wrong). **(B)** canonicalize the tie in BOTH serial and tiled (Richard co-scope): change the DH core's flat
+> labelling to a deterministic rule (e.g. lowest-index basin wins) so tiled matches by construction. (A) keeps
+> serial untouched but must replicate its exact pop-order; (B) is a coordinated upstream change that makes the
+> tie well-defined. Either way the mechanism is LABEL-PARTITION, and the collapse `out_map` hook stays useful.
+
 > **GOAL RAISED (Andy, 2026-07-29):** aim for FULL serial↔parallel IDENTITY (bit-identical canonical
 > signature), not merely volume-correct or split-invariant. PRINCIPLE (verbatim, "definitely remember"):
 > **"They're complementary and both necessary: the collapse gets the right set of depressions; source 2
