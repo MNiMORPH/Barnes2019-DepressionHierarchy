@@ -60,3 +60,44 @@ tree/labels for the affected cases, so they're yours to bless.
 - **Seam-straddling flats / halo:** your perimeter-strip join carries no halo. For the *hierarchy*, a
   flat/tie or basin straddling a seam needs cross-tile reconciliation. Any preference from the filling
   work?
+
+## Remaining split-invariance residual — characterization + one question (2026-07-29)
+
+We raised the bar from "correct-volume + valid-tree" to *split-invariance* (identical tree regardless of
+how the array is tiled) and chased the residual. **Every remaining DIFFER is volume-correct and a valid
+tree** (`VOL-MATCH` across the sweep) — so under the refinement/collapse model above, none is a bug. But
+characterizing them showed the old "PhaseCD tie-break / out_cell class" was **not one thing**; it splits
+three ways, and only one is really yours:
+
+1. **A stitch re-derivation bug — FIXED on our side, was never yours.** The stitch re-derives outlets from
+   the resolved label grid and lacked the explicit lower-`out_cell` tie-break your `PhaseCD` path already
+   had, so its scan was order-dependent (intra-pairs then seam-pairs). Fixed (commit `2948000`): sweep
+   MATCH 72→75, `kerry_test4` splits 3/8/9 DIFFER→MATCH. We had *mis-filed* these as "yours." (Consolidated
+   all three outlet scans into one shared helper so this can't drift again — ENH-5, `b110f0d`.)
+
+2. **Cross-seam flat LABEL assignment (the one that may be yours).** On nested-flat fixtures the tiled
+   flood assigns flat *cells* to depressions differently than the whole-grid flood — `kerry_test2` split 3
+   has 12 raw-label diffs, `kerry_test11` split 7 has 407 — which re-binarizes meta-vs-`ocean_linked` at
+   tied outlets (same depressions, same volume). Your radix fix (#2 above) made flat *pop-order*
+   deterministic so *within-tile* flats resolve identically; but *which depression* a flat cell is labelled
+   into across a seam is still flood-order-dependent. **Question:** do you want a geometry-deterministic
+   flat-LABEL rule (the label analog of #2 / of the resolve_flats flat-routing you already bless for
+   flowdirs), which would make flat labelling split-invariant but **change serial labels** on flat-heavy
+   DEMs? Or is the collapse/refinement model sufficient here and we leave it?
+
+3. **Outlet-order meta-vs-`ocean_linked` with MATCHING labels — we'll investigate first.** A few cases
+   (`kerry_test3`/`kerry_test7` split 3) have **0 raw-label diffs** — labels bit-identical to serial — yet
+   `PhaseCD` still builds a meta where serial builds an `ocean_linked` (a big elevation tie: three flat
+   stripes whose separating walls and the ocean frame are all at the same elevation). Since the labels
+   match and both call the same `PhaseCD`, this is an outlet-SET / tie-order difference, plausibly fixable
+   on our side like #1. We'll chase it before bringing it to you.
+
+## Also for your review (shared-core input handling — ENH-6)
+
+`ocean_labels` treats every NoData cell as OCEAN, and a land↔ocean outlet's sill is taken from the ocean
+cell's **raw DEM value** (the NoData sentinel). So the tree depends on the arbitrary sentinel: `9` "works"
+by luck, `-9999` shifts sills, **`NaN` aborts** `PhaseC`'s outlet sort (real GEBCO NoData). An OCEAN cell
+is base level — the sill should be the **land** cell's elevation, and NoData's meaning (ocean vs interior
+void) should be declared, not guessed. Proposed: a base-level sill in the shared outlet code + a
+`--nodata {ocean|void|error}` flag. Touches `ocean_labels` / outlet elevation, hence your bucket. (Tracked
+as ENH-6, GitHub issue #2.)
