@@ -6,6 +6,17 @@
 upstream merge — especially the ones that **change serial output**. Nothing here has been pushed
 upstream; it lives on the fork's `master`.
 
+**PR status (2026-07-30):** Andy has raised these changes with Richard, who is amenable to them going
+upstream — this file is the review note for that PR. Two things to sharpen before opening it: (a) confirm
+which of the serial-output-changing items below (#1 `PhaseCD` tiebreak, #2 `radix_heap` order, #3 `out_cell`
+tie-break) Richard has explicitly OK'd vs. is still reviewing; (b) note the intended perf follow-up on #2
+(the composite radix key, so the flat sort is not a per-bucket cost). Only the `dephier.hpp` /
+`radix_heap.hpp` changes (the two lists below) are candidates for the upstream PR; the distributed harness
+(`dephier_mpi.cpp`, `dephier_stitch.cpp`) is fork-only. Status since the last note: the distributed build is
+complete (ENH-8) and **bit-identical to serial** across the fixture sweep — that bit-identity rests on the
+serial-determinism changes #1–#3 here **plus** an exact *reproduction* of your flat labelling (the pit-index
+flood replay — NOT a serial change; it matches your algorithm rather than altering it).
+
 ## Changes that CHANGE serial output (please review)
 
 Both are arguably fixes for *latent non-determinism* — the previous output depended on hash-map /
