@@ -134,6 +134,37 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
     dead[a] = 1; dead[b] = 1;
     contracted += 2;
   }
+
+  // Pass B2 -- rim-fragment dissolve. Pass B handles a basin whose FLOOR straddles a seam (both halves
+  // degenerate). This is the complementary case: a basin whose floor lies wholly in ONE tile but whose RIM
+  // the seam cut. The tiling manufactures the across-seam rim strip as a spurious degenerate "depression"
+  // (a seam artifact) that merges back at the rim elevation, so the stitch rebuilds the single serial basin
+  // as a META over {the real basin leaf, the degenerate rim fragment}. Serial keeps it as ONE leaf (the real
+  // basin, outletting past the rim). Detect: a meta with EXACTLY ONE is_seam_artifact child (the rim
+  // fragment -- degenerate with a cross-tile escape into its sibling) and one NON-degenerate real leaf.
+  // Dissolve into the real child's pit, keeping the meta's out_elev/cell_count/dep_vol -- which already equal
+  // serial's whole basin (volume conserved, refinement exact). The is_seam_artifact guard (strict-local-min
+  // pits never have a lower/equal cross-tile neighbour) is what keeps this off genuine basins; the real side
+  // being non-degenerate excludes the Pass B floor-straddle. (Observed: testdem8 split 3 -- the 4-rim of the
+  // 2-basin cut at the seam; serial 1 leaf (2,9,36,212) vs stitch meta over (2,4,30,32)+(4,4,6,0).)
+  for(dh_label_t P=1;P<N;P++){                        // skip ocean (node 0)
+    if(dead[P]) continue;
+    const dh_label_t a = G[P].lchild, b = G[P].rchild;
+    if(a==dh::NO_VALUE || b==dh::NO_VALUE) continue;  // P is not a meta
+    if(dead[a] || dead[b]) continue;
+    const bool a_art = is_seam_artifact(a), b_art = is_seam_artifact(b);
+    if(a_art == b_art) continue;                       // need EXACTLY one seam-artifact child
+    const dh_label_t art  = a_art ? a : b;             // the spurious degenerate rim fragment
+    const dh_label_t real = a_art ? b : a;             // the genuine basin the rim belongs to
+    if(G[real].lchild!=dh::NO_VALUE || G[real].rchild!=dh::NO_VALUE) continue;  // real side must be a leaf
+    if(is_degenerate_leaf(real)) continue;             // ...and a genuine (non-degenerate) basin
+    G[P].pit_cell = G[real].pit_cell;                  // the meta becomes the real basin's single leaf,
+    G[P].pit_elev = G[real].pit_elev;                  // keeping its own out_elev/cell_count/dep_vol
+    G[P].lchild   = dh::NO_VALUE;
+    G[P].rchild   = dh::NO_VALUE;
+    dead[art] = 1; dead[real] = 1;
+    contracted += 2;
+  }
   if(contracted==0) return 0;
 
   // resolve(x) -- follow the parent chain up until a LIVE node. Artifacts are always
