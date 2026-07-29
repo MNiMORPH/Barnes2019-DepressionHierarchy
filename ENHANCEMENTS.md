@@ -458,9 +458,10 @@ Progress this session on the split-invariance program the diagnostic measures:
 
 ## ENH-7: geometry-deterministic flat LABEL assignment (a deterministic label set)
 
-**Status:** noted for the future 2026-07-29 (not planned). Only needed if we ever want the distributed
-build's LABEL set (which depression each cell belongs to) to be split-invariant — the current bar is
-volume-correct + valid-tree, which does NOT require it. Coordinate with Richard (changes serial output).
+**Status:** noted for the future 2026-07-29 (not planned); filed as **GitHub issue #3** to make it
+permanent. Only needed if we ever want the distributed build's LABEL set (which depression each cell
+belongs to) to be split-invariant — the current bar is volume-correct + valid-tree, which does NOT require
+it. Coordinate with Richard (changes serial output).
 
 **Type:** determinism / split-invariance of the per-cell label field.
 
