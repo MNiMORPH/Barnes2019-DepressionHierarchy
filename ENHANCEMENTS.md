@@ -358,6 +358,55 @@ Then a fix or a semantic change happens once. Validate against the differential 
 
 ---
 
+## ENH-6: declared NoData semantics + base-level sill for OCEAN cells (eat real DEMs)
+
+**Status:** open, characterized (2026-07-29, hit while building the Corsica/GEBCO example). Not a blocker
+for the current examples (WTM marks its ocean with a sensible flat `0`, which is unambiguous); required to
+consume real-world DEMs directly.
+
+**Type:** correctness / robustness / generality (input handling). Touches shared core (`ocean_labels`,
+outlet elevation) → coordinate with Richard (same review bucket as the tie-break items).
+
+### Two distinct problems
+**(a) OCEAN-cell elevation is taken from the raw DEM value (arithmetic fragility).** An outlet's elevation
+is `max(landCell, oceanCell)`, and the code uses the ocean cell's *raw DEM value* for `oceanCell`. So the
+DH's answer depends on the arbitrary NoData sentinel: sentinel `9` → outlet `9` (testdem8, "works" by
+luck); `-9999` → outlet = the land value; **`NaN` → `max(land,NaN)=NaN` → PhaseC's outlet-sort assertion
+fires and the build aborts** (observed on `corsica_gebco.tif`, GEBCO's native NoData is NaN). An OCEAN cell
+is *base level*, so a land→ocean outlet's sill is the **land cell's** elevation; the ocean side should be
+treated as −∞ (base level), never the sentinel. This makes the result robust to any sentinel, NaN included,
+and independent of the sentinel's magnitude.
+
+**(b) NoData is SILENTLY interpreted as OCEAN (semantic ambiguity).** `ocean_labels` does
+`isNoData → OCEAN`. But on a real DEM NaN/NoData means several different things:
+- **ocean / base level** (bathymetry masked out) — a terminal sink; ✅ the current assumption, sometimes.
+- **interior void** (cloud, no-return lidar, a hole in the terrain) — NOT base level; treating it as ocean
+  carves a false drainage path straight through the terrain.
+- **outside the study area.**
+
+The failure mode to kill: silently guessing "NoData = ocean" and then either crashing (NaN) or, worse,
+**succeeding with a WRONG tree** (a weird sentinel quietly moving outlets).
+
+### Fix
+- **(a)** In the outlet computation (serial PhaseAB + the re-derivation scans + collapse), treat an OCEAN
+  cell as base level: a land↔OCEAN sill = the land cell's elevation; never read the ocean cell's DEM value.
+- **(b)** A declared-semantics flag, e.g. `--nodata {ocean | void | error}`:
+  - `ocean` → base level (with (a)); `void` → an interior hole handled deliberately (fill / wall / carve —
+    its own sub-question); default `error` → refuse to run if the DEM has NoData whose meaning wasn't
+    declared. No silent interpretation.
+
+### Acceptance criteria
+- `dephier`/stitch/mpi build directly on `corsica_gebco.tif` (NaN NoData) under `--nodata ocean` with no
+  sea-flatten pre-step, tree + volumes matching the flat-ocean-at-0 result.
+- A DEM with an interior NoData void + `--nodata error` (or no flag) exits with a clear message, not a crash
+  or a silently-wrong tree.
+- Serial and all existing fixtures unchanged when NoData is absent or is a sensible ocean value.
+
+### Related
+- Surfaced by the Corsica example (README). The (a) sentinel-as-elevation is in shared core → Richard.
+
+---
+
 ## RESEARCH DIRECTION: lake ↔ drainage-network integration (CHONK-informed)
 
 **Status:** parked (2026-07-27). A research direction, not a bounded code task. Build when ready;
