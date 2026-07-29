@@ -104,6 +104,42 @@ if(USE_GDAL AND GDAL_FOUND)
     )
   endforeach()
 
+  # Regression fixtures for the seam-artifact collapse + NoData-as-ocean semantics
+  # (2026-07-29 findings). These assert the TREE reproduces serial (STITCH-/MPI-*-MATCH)
+  # via stdout, NOT the exit code: on these flat-heavy DEMs the arbitrary in-flat flowdir
+  # differs (accepted), which the exit code also gates. The MATCH assertion is robust --
+  # it says "tiled == serial" without hardcoding node counts, so it survives a DEM regen
+  # and bites precisely if the corresponding fix regresses. Each was shown to fail without
+  # its fix (revert the fix -> STITCH-DIFFER).
+  #
+  # testdem8 has NoData sentinel 9, which ocean_labels reads as OCEAN. split 1 exercises the
+  # basin<->NoData-ocean outlet (was inf volume before 261bbcd); split 3 the rim-fragment meta
+  # dissolve (collapse Pass B2, 2e86ab7).
+  add_test(NAME stitch_nodata_ocean_outlet
+           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/testdem8.dem 0 1)
+  set_tests_properties(stitch_nodata_ocean_outlet PROPERTIES PASS_REGULAR_EXPRESSION "STITCH-MATCH ")
+  add_test(NAME stitch_rim_fragment
+           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/testdem8.dem 0 3)
+  set_tests_properties(stitch_rim_fragment PROPERTIES PASS_REGULAR_EXPRESSION "STITCH-MATCH ")
+
+  # corsica (GEBCO clip): richdem reads its ocean cells as NoData, so a coastal degenerate pit
+  # whose only escape is the NoData-ocean across the seam must still be contracted (is_seam_artifact
+  # NoData escape, 4c3edcb). Split-invariant tree at split 78 in both harnesses.
+  add_test(NAME stitch_coastal_escape
+           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/examples/corsica/corsica.tif 0 78)
+  set_tests_properties(stitch_coastal_escape PROPERTIES PASS_REGULAR_EXPRESSION "STITCH-MATCH ")
+  add_test(NAME mpi_coastal_escape
+           COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/examples/corsica/corsica.tif 0 78)
+  set_tests_properties(mpi_coastal_escape PROPERTIES PASS_REGULAR_EXPRESSION "MPI-TREE-MATCH ")
+
+  # The node-count decomposition diagnostic must report DECOMP-CORRECT even when the full
+  # signature DIFFERs on the accepted tie-break class -- kerry_test4 split 3 is STITCH-DIFFER
+  # but node count 6==6. Locks the diagnostic's separation of a real decomposition error from
+  # the meta-order tie-break noise.
+  add_test(NAME stitch_decomp_diagnostic
+           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test4.dem 0 3)
+  set_tests_properties(stitch_decomp_diagnostic PROPERTIES PASS_REGULAR_EXPRESSION "STITCH-DECOMP-CORRECT ")
+
   install(TARGETS dephier.exe DESTINATION bin)
   install(TARGETS dephier_paper_tests.exe DESTINATION bin)
   install(TARGETS dephier_stats.exe DESTINATION bin)
