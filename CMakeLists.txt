@@ -188,6 +188,16 @@ if(USE_GDAL AND GDAL_FOUND)
            COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test11.dem 0 7)
   set_tests_properties(mpi_tiebreak_volume PROPERTIES PASS_REGULAR_EXPRESSION "MPI-VOL-MATCH ")
 
+  # ENH-8 v1: the distributed build reproduces serial's exact tree via the flat-label replay
+  # (DH_FLAT_PARTITION_REPLAY: rank-0 gather-resolve-scatter + empty-leaf compaction + collapse retired).
+  # kerry_test9 split 7 is MPI-TREE-DIFFER without the flag (cell-assignment residual) and MATCH with it;
+  # bites if the reconciliation regresses. Env-gated so the default build is unchanged.
+  add_test(NAME mpi_flat_partition_replay
+           COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test9.dem 0 7)
+  set_tests_properties(mpi_flat_partition_replay PROPERTIES
+                       ENVIRONMENT "DH_FLAT_PARTITION_REPLAY=1"
+                       PASS_REGULAR_EXPRESSION "MPI-TREE-MATCH ")
+
   # ROAD A proof/guard: the flat-label PARTITION replay must reproduce serial's cell->leaf partition EXACTLY
   # (proven on 49 DEMs). It is the rule dephier_stitch's DH_FLAT_PARTITION_REPLAY relies on; if the flood/
   # radix pop order ever drifts, this bites before the stitch silently stops matching serial. kerry_test10 is
