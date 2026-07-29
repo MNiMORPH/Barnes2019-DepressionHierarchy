@@ -531,9 +531,12 @@ Serial's flat label is order-DEPENDENT (highest-index-first flood pop order), so
 
 **Status:** **DONE 2026-07-29** (GitHub issue #4, MNiMORPH fork). Implemented as `DH_FLAT_REPLAY_V2` in
 `dephier_mpi.cpp` (commit adding the fully per-rank path; v1 `DH_FLAT_PARTITION_REPLAY` untouched and still
-available). Bit-identical to serial on **373/384 single+multi-seam tilings (2-6 tiles), 0 volume errors**;
-the 11 exceptions are all the pre-existing bowl-interior `kerry_test.dem` abort (flag-independent — ENH-2,
-not v2). Validated under **real mpirun at 2/5 processes**. CTests `mpi_flat_replay_v2{,_chained,_canonical}`.
+available). Bit-identical to serial on **every valid case swept: 384/384 single+multi-seam tilings (2-6
+tiles), 0 volume errors**. (A first sweep reported "11 misses"; those were a SWEEP BUG — it fed every DEM
+`ocean_level=0`, but `kerry_test.dem`'s base level is `-9999` and it has NO cell at 0, so at ocean 0 there
+is no base level and the UNTILED serial build aborts too, correctly. At its proper level `-9999` all 11
+`kerry_test.dem` tilings MATCH. Not a bowl-interior/ENH-2 case — serial-untiled aborting rules that out.)
+Validated under **real mpirun at 2/5 processes**. CTests `mpi_flat_replay_v2{,_chained,_canonical}`.
 **v2 turned out STRICTLY MORE CORRECT than v1**, not merely lighter: adopting the stitch's proven
 canonicalisation (survivor = min global leaf label among leaves whose pit lies in the basin + a true-pit
 stamp, `dephier_stitch.cpp` rb2leaf) in place of v1's `glab(pit)` rule fixes tilings where v1 CRASHED
@@ -582,9 +585,8 @@ a flat wider than the cap yields a valid-but-maybe-not-identical partition (VOL-
 flowdir tail. `DH_HALO_DIAG` (gated) reports the halo each rank grew.
 
 ### Acceptance criteria — MET
-- ✓ `MPI-TREE-MATCH` on the corpus at multiple tilings (373/384 single+multi-seam; the 11 misses are the
-  pre-existing bowl-interior abort), per-rank memory O(N/P)+O(cap·boundary), no whole-grid or wide-band
-  gather to rank 0.
+- ✓ `MPI-TREE-MATCH` on the corpus at multiple tilings (384/384 valid single+multi-seam cases), per-rank
+  memory O(N/P)+O(cap·boundary), no whole-grid or wide-band gather to rank 0.
 - ✓ Bit-identical within the cap (in fact bit-identical to SERIAL, and correct where v1 crashed); documented
   VOL-MATCH fallback beyond the cap.
 
