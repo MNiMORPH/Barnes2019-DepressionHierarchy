@@ -458,7 +458,19 @@ Progress this session on the split-invariance program the diagnostic measures:
 
 ## ENH-7: geometry-deterministic flat LABEL assignment (a deterministic label set)
 
-**Status:** noted for the future 2026-07-29 (not planned); filed as **GitHub issue #3** to make it
+**Status:** RESOLVED IN-PROCESS 2026-07-29 — but NOT the way this entry first imagined (see below). The
+"geometry-deterministic nearest-pit rule that changes serial labels" turned out to be the wrong model: the
+flat label partition is ORDER-dependent (the flood's highest-index-first pop order), and the fix is to
+REPRODUCE serial's exact flood partition, not replace it. Done via the flat-partition REPLAY
+(`DH_FLAT_PARTITION_REPLAY` in `dephier_stitch.cpp`, proven partition-identical to serial on 49 DEMs by
+`tools/flat_partition_replay_proof.cpp`), plus the one genuinely-serial-changing piece — the outlet
+`out_cell` tie-break, now canonical (RICHARD_REVIEW_NOTES.md #3). Together: bit-identical serial↔tiled on
+all 107 fixture×split cases (tag `serial-parallel-bitidentical`). The prototype's "nearest-pit, ~0 cost"
+reading below was self-referential and is superseded. **Distributing this into the real per-rank MPI build
+is ENH-8** (v1 rank-0 gather being built now; v2 = fully distributed). Original future-note kept below for
+history.
+
+**(historical) Status:** noted for the future 2026-07-29 (not planned); filed as **GitHub issue #3** to make it
 permanent. Only needed if we ever want the distributed build's LABEL set (which depression each cell
 belongs to) to be split-invariant — the current bar is volume-correct + valid-tree, which does NOT require
 it.
@@ -508,6 +520,63 @@ flood-order dependence — but Richard's to bless, same bucket as the radix fix)
 seam-exchange machinery ENH-1 uses. Only worth it if a downstream consumer needs a stable per-cell label
 field (e.g. exact lake-basin masks that must not shift with the tiling); the tree + volumes are already
 correct without it.
+
+**NOTE (superseded, 2026-07-29):** this "geometry-deterministic, changes-serial" idea is NOT what we did.
+Serial's flat label is order-DEPENDENT (highest-index-first flood pop order), so we REPRODUCE it exactly
+(the replay) rather than replace it. See the status block above and ENH-8.
+
+---
+
+## ENH-8: distribute the flat-label REPLAY per-rank ("v2", fully O(cap·boundary))
+
+**Status:** designed 2026-07-29. **v1 (rank-0 gather-resolve-scatter) is being built now** in `dephier_mpi`;
+this entry is **v2 = the fully-distributed, no-rank-0-bottleneck form**, filed to keep the plan on a linear
+path. Not a blocker: v1 already gives the correct (serial-identical) distributed result; v2 is the footprint
+optimization, exactly the way `PhaseCD` is v1-centralized with the fully-distributed 2016 join deferred.
+
+**Type:** performance / footprint (v1 is correctness-complete).
+
+### Context
+The flat-label partition fix (ENH-7, resolved in-process) is the **replay**: reproduce serial's exact flood
+label partition over a connected flat, seeds + the radix (elevation, index) pop order. Proven distributable
+as a **per-tile adaptive-halo replay** (`tools/flat_label_distributed.cpp`, DIST-PARTITION-MATCH on the whole
+corpus + size-200 fractals up to 5 tiles). Two keys: (1) label each basin by its PIT's GLOBAL cell index —
+namespace-free, so straddling basins agree across tiles with **no seam stitch / union-find**; (2) convergence
+needs TWO consecutive stable halo doublings (one is a coincidence on a wide flat).
+
+**Why this needs a WIDE (growing) halo, unlike ENH-1's O(boundary) flat FLOWDIRS.** ENH-1 distributes as
+three ORDER-INDEPENDENT relaxations (1-column seam exchange per round, converge regardless of sweep order).
+The flat LABEL partition is ORDER-DEPENDENT — it *is* the flood's sequential pop order (a flat interior cell
+becomes its own pit if it pops before a wavefront reaches it). So it cannot be independent relaxation rounds;
+it is an ordered replay over the flat's extent, needing a halo ≈ the flat's cross-seam width (O(flat extent),
+the same bound as the flowdir option-3 halo). For fixtures with flats wider than a tile, that halo spans
+MULTIPLE tiles.
+
+### v1 (being built): rank-0 gather-resolve-scatter
+Mirror the existing conduit pass (`dephier_mpi.cpp` ~line 438, "v1 gather-and-resolve"): each rank ships its
+seam-band columns (dem + glab) to rank 0; rank 0 runs the windowed pit-index replay over each seam-straddling
+band and scatters back corrected labels; the existing outlet scan / PhaseCD run on the corrected labels.
+Footprint: O(band·boundary) gathered to rank 0 (not the whole grid). Correctness-complete, codebase-consistent.
+
+### v2 (this enhancement): fully per-rank wide halo
+Each rank fetches its OWN adaptive/capped halo (up to the flat extent) via a **multi-column seam exchange
+chained across tiles** (a halo wider than one tile pulls columns from the neighbour's neighbour, etc.), runs
+its own pit-index replay, and relabels its owned flat cells to `glab` at the pit cell (exchanged alongside
+the dem halo). No rank-0 gather. Footprint per rank O(N/P)+O(cap·boundary); cap the halo (option-3 style) and
+accept a valid-but-maybe-not-identical partition for flats wider than the cap — exactly the flowdir tail.
+
+### Acceptance criteria
+- `MPI-TREE-MATCH` on the corpus at multiple tilings, per-rank memory O(N/P)+O(cap·boundary), no whole-grid
+  or wide-band gather to rank 0.
+- Bit-identical to the v1 result within the cap; documented fallback beyond it.
+
+### Related
+- Supersedes/continues **ENH-7** (the flat-label determinism, resolved in-process via the replay).
+- Sibling of **ENH-1** (the flat-FLOWDIR distribution) — but ENH-1 is O(boundary) relaxations; ENH-8 is
+  O(cap·boundary) ordered replay, because labels are order-dependent and flowdirs are not.
+- Proven algorithm: `tools/flat_label_distributed.cpp`; feasibility: `tools/flat_seam_feasibility.cpp`.
+- Serial side already done: the `out_cell` tie-break (RICHARD_REVIEW_NOTES.md #3) + the replay
+  (`serial-parallel-bitidentical` tag).
 
 ---
 
