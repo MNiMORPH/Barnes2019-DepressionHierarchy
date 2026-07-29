@@ -461,7 +461,20 @@ Progress this session on the split-invariance program the diagnostic measures:
 **Status:** noted for the future 2026-07-29 (not planned); filed as **GitHub issue #3** to make it
 permanent. Only needed if we ever want the distributed build's LABEL set (which depression each cell
 belongs to) to be split-invariant — the current bar is volume-correct + valid-tree, which does NOT require
-it. Coordinate with Richard (changes serial output).
+it.
+
+**PROTOTYPE MEASURED (2026-07-29, `flat_relabel_prototype.exe`, commit `c263e61`) — the cost is ~ZERO, not
+"changes serial output" as first assumed.** A geometry-deterministic rule (each flat cell → the nearest
+depression pit over same-elevation D8 adjacency, tiebreak lower pit index) reproduces serial's flood labels
+with **0 changes on every covered flat cell across all `test_cases`** (ocean 0). Serial's priority flood
+already labels flat floors by nearest-pit, so the split-invariant geometric rule *is* what serial computes
+— adopting it would barely touch serial. So ENH-7 may be nearly free, which strengthens the case. Two
+caveats before believing it fully: (a) the tiebreak "lower pit index" coincided with serial's frontier
+pop-order on these fixtures but is not *proven* identical universally — a flat with a genuine
+equidistant-between-two-pits tie could differ by a handful; (b) "sill" flat cells (flat but above their
+basin pit, or draining to ocean at equal elevation) are not covered by this simple pit-BFS and need
+separate handling — though they are not the observed drift. Net: promising, worth a fuller pass, and no
+longer clearly a "serial output changes" item — re-check the tiebreak on a tie-heavy fixture next.
 
 **Type:** determinism / split-invariance of the per-cell label field.
 
