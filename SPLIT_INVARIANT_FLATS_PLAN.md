@@ -15,13 +15,32 @@ outlets + PhaseCD + collapse, but the unified result (and a boundary cell shared
 depression) stays seam-dependent → the tree varies with the seam. A label post-pass can't fix it: it must
 give the flat ONE seam-independent identity and MERGE the split leaves.
 
-## Approach
-In flag mode, compute a **canonical floor-flat labelling on the full grid** (geometry only, tiling-
-independent — acceptable under the reproducibility/speed trade; later distributable via the same ENH-1
-seam-exchange relaxation). A connected floor-flat (is_flat = no strictly-lower D8 neighbour; sills excluded)
-is ONE depression whose canonical pit = its **lowest-global-index cell**. Merge every tile-half leaf whose
-pit lies in that flat into one canonical leaf, relabel all its cells, compact away the emptied leaves, then
-run the existing outlet re-derivation + PhaseCD + collapse on the canonicalised labels/tree.
+## Approach — REDIRECTED to ENH-1 (2026-07-29, after the post-hoc surgery hit whack-a-mole)
+The post-hoc full-grid gLabel surgery (S1-S4, saved `scratchpad/dephier_stitch_S1-S4_wip.cpp`) fixed
+kerry_test2/3/7 but **regressed kerry_test12 and left 10/11** — late label-rewriting collides with the
+outlet stage. Redirect to ENH-1's proven seam-exchange relaxation, done EARLY (before PhaseCD/collapse).
+
+**Why early / why ENH-1 (grounded in dephier.hpp):** the cell label grid holds ONLY leaf labels; metas are
+tree nodes, and `CalculateMarginalVolumes` (dephier.hpp:878) attributes each cell by walking UP from its
+leaf label on the fly — the grid is never written with a meta label. So a label-carrying relaxation stays
+in the leaf namespace and never meets a metadepression label. "Abandoned" labels are only real AFTER the
+collapse dissolves/merges nodes (pre-collapse gLabel then points at stale labels) — running the relaxation
+EARLY (live leaf namespace, before PhaseCD/collapse) sidesteps that entirely. Bonus: a cell at meta level
+(≥ both children's outlets) is attributed to the meta by the walk-up regardless of leaf label, so the
+relaxation need only nail BELOW-outlet leaf cells, and a closed floor-flat belongs to exactly one leaf.
+
+**Two mechanisms (both via ENH-1's 1-column seam-exchange, so distributed + split-invariant by construction):**
+1. **Floor-flat label unification** — a min-relaxation of the leaf label over same-elevation floor-flat
+   adjacency: every connected floor-flat converges to ONE (min) label, seam-independently. This is S2 done
+   the ENH-1 way (no full-grid flood-fill, no seam-dependent canonical choice). Merge the tile-half leaves
+   accordingly; compact.
+2. **Deterministic resolution for BOUNDARY / slope cells** — the conduit resolution currently follows the
+   FLOOD's flat flowdirs (`tile.fd`, seam-dependent). Point it at ENH-1's DETERMINISTIC flat flowdirs
+   (`resolve_flat_flowdirs`) instead, so BOUNDARY + slope cells resolve seam-independently. This replaces
+   the failed post-hoc S4 descent trace with a principled "use the deterministic flowdirs we already trust."
+
+Scope the exact touch-points (does the conduit read `tile.fd` where we can swap in the resolved flat fd?)
+before coding; the last approach failed for lack of that grounding.
 
 ## Incremental steps (each measured with check_split_invariance.sh; flag OFF must stay 23/23)
 - **S1 — region finder (build + eyeball).** Full-grid connected floor-flats + canonical (lowest-index) pit.
