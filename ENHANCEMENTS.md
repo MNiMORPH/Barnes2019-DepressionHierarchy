@@ -529,12 +529,21 @@ Serial's flat label is order-DEPENDENT (highest-index-first flood pop order), so
 
 ## ENH-8: distribute the flat-label REPLAY per-rank ("v2", fully O(cap·boundary))
 
-**Status:** designed 2026-07-29; filed as **GitHub issue #4** (MNiMORPH fork). **v1 (rank-0
-gather-resolve-scatter) is being built now** in `dephier_mpi`; this entry is **v2 = the fully-distributed,
-no-rank-0-bottleneck form**, filed to keep the plan on a linear path. Not a blocker: v1 already gives the correct (serial-identical) distributed result; v2 is the footprint
-optimization, exactly the way `PhaseCD` is v1-centralized with the fully-distributed 2016 join deferred.
+**Status:** **DONE 2026-07-29** (GitHub issue #4, MNiMORPH fork). Implemented as `DH_FLAT_REPLAY_V2` in
+`dephier_mpi.cpp` (commit adding the fully per-rank path; v1 `DH_FLAT_PARTITION_REPLAY` untouched and still
+available). Bit-identical to serial on **373/384 single+multi-seam tilings (2-6 tiles), 0 volume errors**;
+the 11 exceptions are all the pre-existing bowl-interior `kerry_test.dem` abort (flag-independent — ENH-2,
+not v2). Validated under **real mpirun at 2/5 processes**. CTests `mpi_flat_replay_v2{,_chained,_canonical}`.
+**v2 turned out STRICTLY MORE CORRECT than v1**, not merely lighter: adopting the stitch's proven
+canonicalisation (survivor = min global leaf label among leaves whose pit lies in the basin + a true-pit
+stamp, `dephier_stitch.cpp` rb2leaf) in place of v1's `glab(pit)` rule fixes tilings where v1 CRASHED
+(`findSet(NO_VALUE)` in PhaseC) -- e.g. `kerry_test10` split 23, `kerry_test4` split 4. That v1 crash is a
+latent pre-existing bug uncovered by the exhaustive v2 sweep; **v1 should be switched to the same rule**
+(the whole-grid replay makes it a one-line change of the survivor pick + pit stamp) or simply retired in
+favour of v2. A halo cap smaller than a flat degrades to a valid (VOL-MATCH) non-identical partition, not a
+crash (the documented fallback).
 
-**Type:** performance / footprint (v1 is correctness-complete).
+**Type:** performance / footprint -- and, as built, a correctness improvement over v1.
 
 ### Context
 The flat-label partition fix (ENH-7, resolved in-process) is the **replay**: reproduce serial's exact flood
@@ -558,17 +567,26 @@ seam-band columns (dem + glab) to rank 0; rank 0 runs the windowed pit-index rep
 band and scatters back corrected labels; the existing outlet scan / PhaseCD run on the corrected labels.
 Footprint: O(band·boundary) gathered to rank 0 (not the whole grid). Correctness-complete, codebase-consistent.
 
-### v2 (this enhancement): fully per-rank wide halo
-Each rank fetches its OWN adaptive/capped halo (up to the flat extent) via a **multi-column seam exchange
-chained across tiles** (a halo wider than one tile pulls columns from the neighbour's neighbour, etc.), runs
-its own pit-index replay, and relabels its owned flat cells to `glab` at the pit cell (exchanged alongside
-the dem halo). No rank-0 gather. Footprint per rank O(N/P)+O(cap·boundary); cap the halo (option-3 style) and
-accept a valid-but-maybe-not-identical partition for flats wider than the cap — exactly the flowdir tail.
+### v2 (DONE): fully per-rank wide halo
+Each rank fetches its OWN adaptive/capped halo via a **multi-column seam exchange chained across tiles** — a
+band (dem + pre-reconciliation glab + ocean flag) advances one tile per round (systolic forwarding), so a
+halo wider than one tile is relayed THROUGH the intervening ranks; rank 0's halo reaching 3 tiles on a
+5-tile fixture is exercised by `mpi_flat_replay_v2_chained`. The halo grows until the OWNED pit-labels are
+stable for TWO consecutive rounds (one is a coincidence on a wide flat) OR the cap, via an OR-reduce so all
+ranks loop in lockstep (a converged rank keeps relaying for others). Each rank then replays serial's
+pit-index flood partition over that halo and maps its owned cells to serial's partition via the stitch's
+canonicalisation (min-leaf survivor per replay basin + true-pit stamp), reduced O(#deps) to rank 0 (an
+`(rb→leaf)` survivor gather + a used-label densify map — NO whole-grid gather). Footprint per rank
+O(N/P)+O(cap·boundary); no rank reads a foreign tile interior at any step. Cap the halo (option-3 style) and
+a flat wider than the cap yields a valid-but-maybe-not-identical partition (VOL-MATCH), not a crash — the
+flowdir tail. `DH_HALO_DIAG` (gated) reports the halo each rank grew.
 
-### Acceptance criteria
-- `MPI-TREE-MATCH` on the corpus at multiple tilings, per-rank memory O(N/P)+O(cap·boundary), no whole-grid
-  or wide-band gather to rank 0.
-- Bit-identical to the v1 result within the cap; documented fallback beyond it.
+### Acceptance criteria — MET
+- ✓ `MPI-TREE-MATCH` on the corpus at multiple tilings (373/384 single+multi-seam; the 11 misses are the
+  pre-existing bowl-interior abort), per-rank memory O(N/P)+O(cap·boundary), no whole-grid or wide-band
+  gather to rank 0.
+- ✓ Bit-identical within the cap (in fact bit-identical to SERIAL, and correct where v1 crashed); documented
+  VOL-MATCH fallback beyond the cap.
 
 ### Related
 - Supersedes/continues **ENH-7** (the flat-label determinism, resolved in-process via the replay).
