@@ -838,16 +838,23 @@ int main(int argc, char **argv){
 
   // ---- decomposition-correctness diagnostic: the NODE COUNT ----
   // The depression tree is split-invariant: a correct build has the SAME set of depressions no matter
-  // where the tile seams fall, so its node count is independent of the decomposition. Therefore an
-  // unequal node count is a definitive symptom of an INCORRECT decomposition -- a real basin the tiling
-  // dropped/merged, or a spurious seam artifact the collapse pass failed to contract (e.g. the Corsica
-  // coastal degenerate leaf before the NoData-as-ocean escape fix). It is a NECESSARY condition, weaker
-  // than the full canonical signature: a signature difference with EQUAL node count is the known,
-  // accepted PhaseCD tie-break / ocean_linked nesting-order class (same depressions, reshuffled order --
-  // acceptable under the volume-correct+valid-tree bar). So the node count is the clean structural test
-  // of the decomposition itself, with the tie-break noise factored out. (At GEBCO scale there is no
-  // serial reference to diff against; the same invariant then powers a serial-free self-check -- build at
-  // two different splits and compare node counts, which must agree.)
+  // where the tile seams fall, so its node count is independent of the decomposition. An unequal node
+  // count is therefore a NECESSARY-condition symptom that the split changed the tree -- weaker than the
+  // full canonical signature but a real structural signal. It flags TWO things, which the diff must
+  // separate by hand:
+  //   (1) genuine seam artifacts the collapse pass failed to contract -- a spurious extra depression
+  //       (Corsica coastal leaf pre-NoData-fix; testdem8 rim fragment pre-Pass-B2; the residual
+  //       split-10 kerry cases). These are real bugs to chase; the collapse should make node count agree.
+  //   (2) the STRUCTURAL sub-class of the PhaseCD tie-break: at a TIED outlet elevation two basins may be
+  //       rebuilt either as co-equal children of a META or with one ocean_linked into the other -- SAME
+  //       depressions and volume, but meta-vs-ocean_linked changes the node count (kerry_test2: serial
+  //       meta+2 leaves vs stitch 1 leaf + 1 ocean_linked, 4 vs 3 nodes). This CHANGES serial output ->
+  //       Richard-coordinated, acceptable under the volume-correct+valid-tree bar.
+  // (So node count does NOT cleanly isolate "decomposition bug" from all tie-break noise: only the
+  // pure-ORDERING tie-break sub-class preserves node count -- those show DIFFER but DECOMP-CORRECT, e.g.
+  // kerry_test4 splits 3/8. The meta-vs-ocean_linked sub-class does not.) At GEBCO scale there is no
+  // serial to diff; the same invariant then powers a serial-free self-check -- build at two splits, node
+  // counts must agree (a mismatch there is class (1) or (2), never a decomposition that is actually right).
   const bool decomp_ok = (iv_d.n_nodes == iv_s.n_nodes);
   std::cout<<(decomp_ok ? "MPI-DECOMP-CORRECT " : "MPI-DECOMP-INCORRECT ")<<in_name
            <<" ranks="<<ntiles<<" nodes(serial="<<iv_s.n_nodes<<" dist="<<iv_d.n_nodes<<")\n";
