@@ -163,7 +163,7 @@ int main(int argc, char **argv){
     tile.fd = rd::Array2D<int8_t>(tile.dem.width(), tile.dem.height(), rd::NO_FLOW);
     // A tile may be a bowl interior (no base-level seed); permit the pit-only flood. Its open
     // top depression is closed later across the seam by HandleEdge + PhaseCD (ENH-2).
-    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(tile.dem, tile.label, tile.fd, tile.deps, tile.outlets, /*permit_without_baselevel_seed=*/true);
+    dh::FloodAndAssignDepressions<float,rd::Topology::D8>(tile.dem, tile.label, tile.fd, tile.deps, tile.outlets, /*permit_without_baselevel_seed=*/true);
     tile.offset = next_offset;
     next_offset += tile.deps.size() - 1;
   }
@@ -493,7 +493,7 @@ int main(int argc, char **argv){
     rd::Array2D<dh_label_t> a_label = ocean_labels(full, ocean_level);
     rd::Array2D<int8_t> a_fd(full.width(), full.height(), rd::NO_FLOW);
     dh::DepressionHierarchy<float> a_deps; std::vector<dh::Outlet<float>> a_out;
-    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(full, a_label, a_fd, a_deps, a_out, true);
+    dh::FloodAndAssignDepressions<float,rd::Topology::D8>(full, a_label, a_fd, a_deps, a_out, true);
     const auto keyOf=[&](const dh::DepressionHierarchy<float>&D, dh_label_t a, dh_label_t b){
       const auto pc=[&](dh_label_t x)->long{ return (x==OCEAN||x>=D.size()||D[x].pit_cell==dh::NO_VALUE)?-1:(long)D[x].pit_cell; };
       const long pa=pc(a), pb=pc(b); return std::make_pair(std::min(pa,pb), std::max(pa,pb)); };
@@ -515,7 +515,7 @@ int main(int argc, char **argv){
   }
 
   // ---- one global PhaseCD ----
-  dh::GetDepressionHierarchyPhaseCD<float>(G, outlets, full, gLabel);
+  dh::ConstructHierarchyAndVolumes<float>(G, outlets, full, gLabel);
 
   // ---- §3.2 collapse pass: contract seam-split artifacts to a serial-identical tree ----
   // RETIRED when the flat-partition replay is on: the replay gives serial's exact partition, so outlets ->

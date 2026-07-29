@@ -1,5 +1,5 @@
 // bowl_interior_seed_test -- unit test for the ENH-2 pit-only seeding flag
-// (GetDepressionHierarchyPhaseAB's `permit_without_baselevel_seed`).
+// (FloodAndAssignDepressions's `permit_without_baselevel_seed`).
 //
 // A "bowl-interior" tile in a distributed build lies entirely inside a closed basin whose rim is
 // beyond the tile on every side: every one of its cells drains INWARD, so it has no OCEAN and no
@@ -47,7 +47,7 @@ int main(){
     std::vector<dh::Outlet<float>> outlets;
     bool threw=false;
     try {
-      dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem,label,fd,deps,outlets,/*permit=*/false);
+      dh::FloodAndAssignDepressions<float,rd::Topology::D8>(dem,label,fd,deps,outlets,/*permit=*/false);
     } catch(const std::runtime_error &){ threw=true; }
     if(!threw){ std::cerr<<"FAIL: permit=false on a seedless bowl did NOT throw\n"; failures++; }
     else       std::cout<<"ok: permit=false throws on a seedless bowl-interior tile\n";
@@ -61,7 +61,7 @@ int main(){
     dh::DepressionHierarchy<float> deps;
     std::vector<dh::Outlet<float>> outlets;
     try {
-      dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem,label,fd,deps,outlets,/*permit=*/true);
+      dh::FloodAndAssignDepressions<float,rd::Topology::D8>(dem,label,fd,deps,outlets,/*permit=*/true);
     } catch(const std::exception &e){
       std::cerr<<"FAIL: permit=true on a seedless bowl threw: "<<e.what()<<"\n"; failures++;
     }

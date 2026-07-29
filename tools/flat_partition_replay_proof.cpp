@@ -5,7 +5,7 @@
 // serial. Proven on 49 DEMs (24 kerry/testdem fixtures + Corsica + adversarial fractals). Exits nonzero on
 // any PARTITION-DIFFER so it can gate as a CTest.
 //
-// Faithful to dephier.hpp GetDepressionHierarchyPhaseAB (lines 360-536) + radix_heap.hpp (391-399):
+// Faithful to dephier.hpp FloodAndAssignDepressions (lines 360-536) + radix_heap.hpp (391-399):
 //  * seeds pushed at init: every OCEAN cell, and every land cell with NO strictly-lower neighbour (a
 //    land_seed / pit -- this INCLUDES all is_flat interiors), each at its dem elevation.
 //  * process buckets by elevation ASCENDING; within a bucket sort ASC by cell index and consume pop_back

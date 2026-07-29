@@ -12,7 +12,7 @@
 //   * component 2 (per-rank PhaseAB) + component 3 (perimeter-strip exchange) of the plan.
 //   * Each rank extracts its own DEM columns, exchanges its 1-column edge elevations with its
 //     seam neighbours via the shim, computes the BOUNDARY pre-label from own+halo columns
-//     (no full grid), and runs GetDepressionHierarchyPhaseAB locally.
+//     (no full grid), and runs FloodAndAssignDepressions locally.
 //   * ORACLE: the same per-tile PhaseAB but with BOUNDARY computed from the FULL grid (the
 //     tools/dephier_stitch.cpp per-tile step). The distributed label+fd must be bit-identical.
 //   Verifies: (a) the shim moves DH edge strips across a multi-rank line with no deadlock, and
@@ -260,7 +260,7 @@ int main(int argc, char **argv){
       }
     rd::Array2D<int8_t> fd(dem.width(), dem.height(), rd::NO_FLOW);
     dh::DepressionHierarchy<float> deps; std::vector<dh::Outlet<float>> outlets;
-    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
+    dh::FloodAndAssignDepressions<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
     oracle[t].label = std::move(label);
     oracle[t].fd    = std::move(fd);
     oracle[t].nboundary = nb;
@@ -431,7 +431,7 @@ int main(int argc, char **argv){
 
     rd::Array2D<int8_t> fd(dem.width(), dem.height(), rd::NO_FLOW);
     dh::DepressionHierarchy<float> deps; std::vector<dh::Outlet<float>> outlets;
-    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
+    dh::FloodAndAssignDepressions<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
 
     // Namespace remap (eng-doc component 6): gather per-tile depression counts to rank 0,
     // prefix-sum into global offsets, scatter each rank its offset. This is the shim analogue
@@ -789,7 +789,7 @@ int main(int argc, char **argv){
         dh::Outlet<float> o; o.depa=kv.first.first; o.depb=kv.first.second;
         o.out_elev=kv.second.first; o.out_cell=kv.second.second; outlets.push_back(o);
       }
-      dh::GetDepressionHierarchyPhaseC<float>(Gdist, outlets);   // grid-free; grows Gdist with meta nodes
+      dh::ConstructHierarchy<float>(Gdist, outlets);   // grid-free; grows Gdist with meta nodes
       const dh_label_t T = Gdist.size();
       tree_out_elev.resize(T); tree_parent.resize(T);
       for(dh_label_t i=0;i<T;i++){ tree_out_elev[i]=Gdist[i].out_elev; tree_parent[i]=Gdist[i].parent; }
