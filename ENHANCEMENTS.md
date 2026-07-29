@@ -402,8 +402,33 @@ The failure mode to kill: silently guessing "NoData = ocean" and then either cra
   or a silently-wrong tree.
 - Serial and all existing fixtures unchanged when NoData is absent or is a sensible ocean value.
 
+### Update 2026-07-29 — a THIRD silent NoData-as-ocean read, in the collapse pass
+Building the Corsica example split-invariant (identical tree regardless of tiling) uncovered another place
+that silently reads NoData as OCEAN — the same class as problem (b), in a new spot. The §3.2 collapse pass's
+`is_seam_artifact` (`tools/dh_collapse.hpp`) scans a degenerate pit's D8 neighbours for a cross-tile escape
+but **skipped NoData neighbours** (`if(isNoData) continue`). richdem reads Corsica's ocean cells (value 0)
+as `isNoData=1`, so a coastal degenerate pit whose only lower neighbour is the NoData-ocean across the seam
+was never recognised as a seam artifact → left as a split-dependent extra zero-volume leaf (`pit(78,63)` at
+split 78: 164 nodes vs serial 163). This is the identical `if(isNoData) continue` bug already fixed in the
+two `record()` outlet re-derivation scans (`261bbcd`/`a8ecd2e`) — a **third copy** of the same NoData-ocean
+assumption (see ENH-5: consolidate them; the whole family shares one `skip()`/"OCEAN = base level" rule).
+Fixed `4c3edcb`: a cross-tile `isNoData || val<=pit_elev` neighbour is the escape; Corsica is now
+bit-identical at every tiling. **Bearing on this ENH:** every one of these scattered reads bakes in "NoData
+= ocean"; the `--nodata` flag (fix (b)) and the base-level sill (fix (a)) must land in ONE shared helper
+(ENH-5) so a future `--nodata void` flips all of them at once, not three-plus places independently. The
+collapse fix keeps the *current* `ocean_labels` semantics (NoData = ocean) — consistent, not a new policy.
+
+Also added this session: the **node count is now an explicit decomposition-correctness diagnostic**
+(`0371dec`, `STITCH-`/`MPI-DECOMP-CORRECT`/`-INCORRECT`). Because the tree is split-invariant, an unequal
+node count is a definitive symptom of an incorrect decomposition, cleanly separated from the accepted
+tie-break nesting noise (which keeps node count constant). It confirms the Corsica class is now split-
+invariant, and flags ~38 volume-correct-but-not-yet-split-invariant fixtures (extra zero-vol artifacts the
+collapse still misses + the PhaseCD merge-order/tie-break class) as the remaining split-invariance work.
+
 ### Related
 - Surfaced by the Corsica example (README). The (a) sentinel-as-elevation is in shared core → Richard.
+- The collapse NoData read (Update above) is the third instance of the (b) silent NoData-as-ocean class;
+  fold all of them into ENH-5's single shared scan so `--nodata` governs them uniformly.
 
 ---
 
