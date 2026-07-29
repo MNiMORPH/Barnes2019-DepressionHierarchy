@@ -534,6 +534,39 @@ int main(int argc, char **argv){
              <<ediff<<" elevation diff(s) (PhaseAB tile.outlets vs re-derived global)\n";
   }
 
+  // ---- DEBUG: compare the tiled outlet set fed to PhaseCD against SERIAL's own outlets ----
+  // Set DH_AUDIT_VS_SERIAL=1. PhaseC's outlet sort (dephier.hpp:660) is fully deterministic on the outlet
+  // SET (out_elev -> out_cell -> endpoint pit cells), so if the tiled build feeds the SAME outlets serial
+  // does, it reproduces serial's tree exactly. This audits that: a fresh serial PhaseAB's outlets vs the
+  // tiled `outlets`, keyed namespace-free by the endpoint depressions' pit cells. A differing out_cell on a
+  // shared pair (same out_elev) is a TIE the tiled outlet re-derivation broke differently than serial's
+  // flood -- the source of the meta-ordering / meta-vs-ocean_linked residual, and an OUR-SIDE fix (no serial
+  // change) iff serial's own choice is itself deterministic/reproducible.
+  if(std::getenv("DH_AUDIT_VS_SERIAL")){
+    rd::Array2D<dh_label_t> a_label = ocean_labels(full, ocean_level);
+    rd::Array2D<int8_t> a_fd(full.width(), full.height(), rd::NO_FLOW);
+    dh::DepressionHierarchy<float> a_deps; std::vector<dh::Outlet<float>> a_out;
+    dh::GetDepressionHierarchyPhaseAB<float,rd::Topology::D8>(full, a_label, a_fd, a_deps, a_out, true);
+    const auto keyOf=[&](const dh::DepressionHierarchy<float>&D, dh_label_t a, dh_label_t b){
+      const auto pc=[&](dh_label_t x)->long{ return (x==OCEAN||x>=D.size()||D[x].pit_cell==dh::NO_VALUE)?-1:(long)D[x].pit_cell; };
+      const long pa=pc(a), pb=pc(b); return std::make_pair(std::min(pa,pb), std::max(pa,pb)); };
+    std::map<std::pair<long,long>,std::pair<float,long>> smap, tmap;
+    for(auto&o:a_out)   smap[keyOf(a_deps,o.depa,o.depb)]={o.out_elev,(long)o.out_cell};
+    for(auto&o:outlets) tmap[keyOf(G,     o.depa,o.depb)]={o.out_elev,(long)o.out_cell};
+    long same=0, cdiff=0, ediff=0, only_s=0, only_t=0;
+    for(auto&kv:smap){ auto it=tmap.find(kv.first);
+      if(it==tmap.end()){ only_s++; continue; }
+      if(kv.second.first!=it->second.first) ediff++;
+      else if(kv.second.second!=it->second.second){ cdiff++;
+        std::cerr<<"  OUTLET out_cell diff at pit-pair ("<<kv.first.first<<","<<kv.first.second<<") elev="
+                 <<kv.second.first<<": serial out_cell="<<kv.second.second<<" tiled="<<it->second.second<<"\n"; }
+      else same++; }
+    for(auto&kv:tmap) if(smap.find(kv.first)==smap.end()) only_t++;
+    std::cerr<<"AUDIT-VS-SERIAL "<<in_name<<" splits="<<argv[3]<<": serial_outlets="<<a_out.size()
+             <<" tiled_outlets="<<outlets.size()<<" same="<<same<<" out_cell_diff="<<cdiff
+             <<" out_elev_diff="<<ediff<<" only_serial="<<only_s<<" only_tiled="<<only_t<<"\n";
+  }
+
   // ---- one global PhaseCD ----
   dh::GetDepressionHierarchyPhaseCD<float>(G, outlets, full, gLabel);
 
