@@ -198,6 +198,26 @@ if(USE_GDAL AND GDAL_FOUND)
                        ENVIRONMENT "DH_FLAT_PARTITION_REPLAY=1"
                        PASS_REGULAR_EXPRESSION "MPI-TREE-MATCH ")
 
+  # ENH-8 v2: the FULLY PER-RANK flat-label replay (DH_FLAT_REPLAY_V2: chained-halo pit-index replay +
+  # stitch-style canonicalisation, NO rank-0 whole-grid gather). Three guards:
+  #  - basic: same case as v1, must also reach MPI-TREE-MATCH.
+  add_test(NAME mpi_flat_replay_v2
+           COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test9.dem 0 7)
+  set_tests_properties(mpi_flat_replay_v2 PROPERTIES
+                       ENVIRONMENT "DH_FLAT_REPLAY_V2=1" PASS_REGULAR_EXPRESSION "MPI-TREE-MATCH ")
+  #  - chained relay: 5 tiles with a flat wider than a middle tile, so the halo must be relayed THROUGH an
+  #    intervening rank (rank 0's halo spans 3 tiles). Bites if the systolic forwarding breaks.
+  add_test(NAME mpi_flat_replay_v2_chained
+           COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test10.dem 0 2,4,6,8)
+  set_tests_properties(mpi_flat_replay_v2_chained PROPERTIES
+                       ENVIRONMENT "DH_FLAT_REPLAY_V2=1" PASS_REGULAR_EXPRESSION "MPI-TREE-MATCH ")
+  #  - correctness beyond v1: kerry_test10 split 23 CRASHES under v1's glab(pit) rule (findSet(NO_VALUE));
+  #    v2's stitch-style min-leaf + true-pit stamp makes it MPI-TREE-MATCH. Bites if that rule regresses.
+  add_test(NAME mpi_flat_replay_v2_canonical
+           COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test10.dem 0 23)
+  set_tests_properties(mpi_flat_replay_v2_canonical PROPERTIES
+                       ENVIRONMENT "DH_FLAT_REPLAY_V2=1" PASS_REGULAR_EXPRESSION "MPI-TREE-MATCH ")
+
   # ROAD A proof/guard: the flat-label PARTITION replay must reproduce serial's cell->leaf partition EXACTLY
   # (proven on 49 DEMs). It is the rule dephier_stitch's DH_FLAT_PARTITION_REPLAY relies on; if the flood/
   # radix pop order ever drifts, this bites before the stitch silently stops matching serial. kerry_test10 is
