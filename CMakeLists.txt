@@ -186,6 +186,15 @@ if(USE_GDAL AND GDAL_FOUND)
            COMMAND flat_partition_replay_proof.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test10.dem 0)
   set_tests_properties(flat_partition_replay_proof PROPERTIES PASS_REGULAR_EXPRESSION "PARTITION-MATCH")
 
+  # ROAD A integration: DH_FLAT_PARTITION_REPLAY reconstructs serial's exact cell->leaf partition, closing
+  # the cell-assignment DIFFER class. kerry_test4 split 5 is STITCH-DIFFER without the flag and STITCH-MATCH
+  # with it (bites: disable the replay -> DIFFER). Env-gated so the default build stays byte-identical.
+  add_test(NAME stitch_flat_partition_replay
+           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test4.dem 0 5)
+  set_tests_properties(stitch_flat_partition_replay PROPERTIES
+                       ENVIRONMENT "DH_FLAT_PARTITION_REPLAY=1"
+                       PASS_REGULAR_EXPRESSION "STITCH-MATCH ")
+
   install(TARGETS dephier.exe DESTINATION bin)
   install(TARGETS dephier_paper_tests.exe DESTINATION bin)
   install(TARGETS dephier_stats.exe DESTINATION bin)

@@ -342,6 +342,93 @@ int main(int argc, char **argv){
   // `continue` on all NoData cells and drop it, leaving the basin unclosed (inf volume). The `skip()`
   // below closes that gap (skip a cell only if NoData AND not OCEAN). A debug flag audits for further
   // drift by diffing this set against PhaseAB's tile.outlets -- see DH_AUDIT_OUTLETS below.
+  // ---- FLAT-PARTITION REPLAY: reconstruct serial's exact cell->leaf partition (flag-gated; ROAD A) ----
+  // SPLIT_INVARIANT_FLATS_PLAN.md ROAD A. The tiled flood labels a divide/flat cell by a SEAM-DEPENDENT
+  // wavefront, so a cell can land in the wrong leaf -> wrong cell_count/dep_vol (the cell-assignment DIFFER
+  // class). Serial's label = the depression the FLOOD claims the cell into, which for flats is a geodesic
+  // partition tie-broken by the radix pop order -- NOT the pit a flowdir drains to (that mistake emptied
+  // sill-flat leaves; see the containment cc-pass finding). Here we REPLAY serial's flood-labelling exactly
+  // (proven bit-identical partition on 49 DEMs incl. Corsica + adversarial fractals; tools/
+  // flat_partition_replay_proof.cpp): seeds = every OCEAN cell + every land cell with NO strictly-lower
+  // neighbour (the land_seed/pit set, dephier.hpp:412 -- includes all flat interiors), each at its dem
+  // elevation; process elevation buckets ASCending, within a bucket HIGHEST-index first with same-elevation
+  // labels appended and popped LIFO (the fork radix_heap tie-break, radix_heap.hpp:391); a popped NO_DEP cell
+  // starts a new pit; ocean at its dem elevation, propagating OCEAN. Then map each replay-basin onto G's
+  // EXISTING leaf via that leaf's pit cell (the min leaf when a seam split one basin into several -> they
+  // merge, subsuming source-1) and overwrite gLabel; compact G. Structure follows: outlets are re-derived
+  // from this corrected gLabel, so PhaseCD builds on serial's partition. Full-grid here (the flag's
+  // reproducibility trade); distributable later via ENH-1 seam-exchange replaying the flood ORDER across the
+  // seam. Default OFF => byte-identical.
+  const bool flat_replay = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr;
+  if(flat_replay){
+    const int W=full.width(), H=full.height();
+    // 1. Full pit-up replay of the flood's label partition into r (fresh namespace; OCEAN kept as OCEAN).
+    rd::Array2D<dh_label_t> r(W,H,dh::NO_DEP);
+    std::map<float,std::vector<long>> buckets;
+    const auto rpush=[&](int x,int y){ buckets[full(x,y)].push_back(full.xyToI(x,y)); };
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++){
+      if(is_ocean(x,y)){ r(x,y)=OCEAN; rpush(x,y); continue; }
+      const float e=full(x,y); bool has_lower=false;
+      for(int dy=-1;dy<=1&&!has_lower;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=x+dx,ny=y+dy;
+        if(full.inGrid(nx,ny)&&full(nx,ny)<e){ has_lower=true; break; } }
+      if(!has_lower) rpush(x,y);
+    }
+    dh_label_t nextr=1;
+    std::vector<long> rb_pit(1, -1);                          // rb_pit[label] = the cell that BORE that basin
+    while(!buckets.empty()){
+      auto it=buckets.begin(); const float e=it->first;
+      std::vector<long> cur=std::move(it->second); buckets.erase(it);
+      std::sort(cur.begin(),cur.end());                       // ascending index; pop_back = highest first
+      while(!cur.empty()){
+        const long ci=cur.back(); cur.pop_back();
+        int cx,cy; full.iToxy(ci,cx,cy);
+        dh_label_t cl=r(cx,cy);
+        if(cl==dh::NO_DEP){ cl=nextr++; r(cx,cy)=cl; rb_pit.push_back(ci); }   // popped NO_DEP -> new pit (= serial's pit)
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=cx+dx,ny=cy+dy;
+          if(!full.inGrid(nx,ny) || r(nx,ny)!=dh::NO_DEP) continue;
+          r(nx,ny)=cl; if(full(nx,ny)==e) cur.push_back(full.xyToI(nx,ny)); else buckets[full(nx,ny)].push_back(full.xyToI(nx,ny)); }
+      }
+    }
+    // 2. Map each replay-basin to G's EXISTING leaf via that leaf's pit cell (min leaf = canonical; several
+    //    leaves in one replay-basin = a seam-split basin -> they merge into the min, subsuming source-1).
+    std::vector<dh_label_t> rb2leaf(nextr, dh::NO_VALUE);
+    for(dh_label_t i=1;i<G.size();i++){
+      if(G[i].pit_cell==dh::NO_VALUE) continue;
+      int px,py; full.iToxy(G[i].pit_cell,px,py); const dh_label_t rb=r(px,py);
+      if(rb==OCEAN || rb>=nextr) continue;
+      if(rb2leaf[rb]==dh::NO_VALUE || i<rb2leaf[rb]) rb2leaf[rb]=i;
+    }
+    // Stamp each canonical leaf with the replay's own pit (= serial's pit: the lowest, highest-index cell of
+    // the basin). pit_elev IS in the canonical signature, so a merged leaf must carry the basin's true min,
+    // not the arbitrary min-label fragment's pit (fixes testdem8 sp3: serial pit_elev 2 vs fragment's 4).
+    for(dh_label_t rb=1;rb<nextr;rb++){
+      const dh_label_t L=rb2leaf[rb];
+      if(L==dh::NO_VALUE) continue;
+      G[L].pit_cell=(dh::flat_c_idx)rb_pit[rb]; int px,py; full.iToxy(rb_pit[rb],px,py); G[L].pit_elev=full(px,py);
+    }
+    // 3. Overwrite gLabel with serial's partition (in G's namespace).
+    long relabeled=0, orphan=0;
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++){
+      if(is_ocean(x,y)){ gLabel(x,y)=OCEAN; continue; }
+      const dh_label_t rb=r(x,y);
+      if(rb==OCEAN){ if(gLabel(x,y)!=OCEAN){ gLabel(x,y)=OCEAN; relabeled++; } continue; }
+      const dh_label_t L = (rb<nextr) ? rb2leaf[rb] : dh::NO_VALUE;
+      if(L==dh::NO_VALUE){ orphan++; continue; }               // no G-leaf for this basin: keep existing label
+      if(gLabel(x,y)!=L){ gLabel(x,y)=L; relabeled++; }
+    }
+    // 4. Compact G: keep only leaves still referenced by gLabel (dropped = merged-away / emptied), renumber.
+    std::vector<char> used(G.size(),0); used[0]=1;             // ocean node always kept
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(gLabel(x,y)!=OCEAN) used[gLabel(x,y)]=1;
+    std::vector<dh_label_t> dense(G.size(),0); dh_label_t nn=0;
+    for(dh_label_t i=0;i<G.size();i++) if(used[i]) dense[i]=nn++;
+    dh::DepressionHierarchy<float> G2(nn);
+    for(dh_label_t i=0;i<G.size();i++) if(used[i]){ G2[dense[i]]=G[i]; G2[dense[i]].dep_label=dense[i]; }
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(gLabel(x,y)!=OCEAN) gLabel(x,y)=dense[gLabel(x,y)];
+    const dh_label_t old_leaves=G.size(); G = std::move(G2);
+    std::cerr<<"FLAT-PARTITION-REPLAY: "<<nextr-1<<" replay basins, relabeled "<<relabeled
+             <<" cells, leaves "<<old_leaves<<"->"<<nn<<" orphan_cells="<<orphan<<"\n";
+  }
+
   // ---- SPLIT-INVARIANT FLATS: early seam-split-flat unification (flag-gated; SPLIT_INVARIANT_FLATS_PLAN.md) ----
   // Opt-in reproducibility mode (Andy: retire the collapse's seam-dependent meta-over-halves handling). A
   // depression-FLOOR flat cut by a seam is otherwise rebuilt per-tile as multiple leaves and later dissolved
@@ -460,9 +547,16 @@ int main(int argc, char **argv){
         pit2leaf_pre[G[i].pit_cell]=i;
 
   // ---- §3.2 collapse pass: contract seam-split artifacts to a serial-identical tree ----
+  // RETIRED when the flat-partition replay is on: the replay gives serial's exact partition, so outlets ->
+  // PhaseCD build serial's tree with no seam artifacts, and the compact already drops spurious leaves. The
+  // collapse's meta-over-halves passes (seam-dependent) would then DISSOLVE REAL structure (measured:
+  // kerry_test9 sp7 merged two genuine basins). This is the retirement the warning has been flagging.
   std::vector<dh_label_t> collapse_map;                       // pre-collapse -> post-collapse label remap
-  const int n_collapsed = CollapseSeamArtifacts(G, full, bounds, ccpass ? &collapse_map : nullptr);
-  if(n_collapsed) std::cerr<<"collapse: contracted "<<n_collapsed<<" seam artifact(s)\n";
+  int n_collapsed = 0;
+  if(!flat_replay){
+    n_collapsed = CollapseSeamArtifacts(G, full, bounds, ccpass ? &collapse_map : nullptr);
+    if(n_collapsed) std::cerr<<"collapse: contracted "<<n_collapsed<<" seam artifact(s)\n";
+  }
 
   // ---- CONTAINMENT cc-pass: structure-preserving cell re-attribution (flag-gated) ----
   // SPLIT_INVARIANT_FLATS_PLAN.md's "source 2, done safely." The tiled flood labels a divide/flat cell by
