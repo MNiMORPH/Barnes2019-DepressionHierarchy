@@ -1,5 +1,14 @@
 # Plan: flag-gated split-invariant flats (GitHub #3 / ENH-7)
 
+> **STATUS 2026-07-29:** Source-1 SHIPPED (`010c4a4`) + collapse retirement warning (`3e28f7c`). The
+> flag-gated early floor-flat unification drives the seam-dependent meta-over-halves collapse to ZERO
+> (Andy's goal), keeps invariant cases invariant, default off byte-identical (23/23). **Source 2 (divide-
+> cell ties between adjacent depressions) is deliberately NOT pursued** (Andy). Follow-ons: (a) distribute
+> the unification via ENH-1's seam-exchange; (b) promote env flag → CLI flag; (c) once early unification
+> catches all seam-split flats, DELETE the now-retired collapse Pass B/B2. The two failed post-hoc
+> approaches (S1-S4 full trace) are superseded; WIP saved in scratchpad.
+
+
 ## Goal
 An **opt-in** mode (flag) in which the tiled DepressionHierarchy is **split-invariant**: `STITCH-SIG`
 identical across tilings for every DEM. Trades speed + complexity for reproducibility/safety (Andy's call).
