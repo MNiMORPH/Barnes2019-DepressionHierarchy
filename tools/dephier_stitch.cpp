@@ -450,9 +450,60 @@ int main(int argc, char **argv){
   // ---- one global PhaseCD ----
   dh::GetDepressionHierarchyPhaseCD<float>(G, outlets, full, gLabel);
 
+  // CONTAINMENT cc-pass (flag-gated): snapshot pit -> pre-collapse leaf now, while every pit is a LIVE leaf.
+  // The recompute itself runs AFTER the collapse, on the FROZEN serial-identical tree (see below).
+  const bool ccpass = std::getenv("DH_CONTAINMENT_CCPASS")!=nullptr;
+  std::map<dh::flat_c_idx,dh_label_t> pit2leaf_pre;
+  if(ccpass)
+    for(dh_label_t i=1;i<G.size();i++)
+      if(G[i].pit_cell!=dh::NO_VALUE && G[i].lchild==dh::NO_VALUE && G[i].rchild==dh::NO_VALUE)
+        pit2leaf_pre[G[i].pit_cell]=i;
+
   // ---- §3.2 collapse pass: contract seam-split artifacts to a serial-identical tree ----
-  const int n_collapsed = CollapseSeamArtifacts(G, full, bounds);
+  std::vector<dh_label_t> collapse_map;                       // pre-collapse -> post-collapse label remap
+  const int n_collapsed = CollapseSeamArtifacts(G, full, bounds, ccpass ? &collapse_map : nullptr);
   if(n_collapsed) std::cerr<<"collapse: contracted "<<n_collapsed<<" seam artifact(s)\n";
+
+  // ---- CONTAINMENT cc-pass: structure-preserving cell re-attribution (flag-gated) ----
+  // SPLIT_INVARIANT_FLATS_PLAN.md's "source 2, done safely." The tiled flood labels a divide/flat cell by
+  // a SEAM-DEPENDENT wavefront, so a cell can land in the wrong leaf -> wrong cell_count/dep_vol (the
+  // cell-assignment DIFFER class; measured leaf-assignment diffs up to 402). Serial instead labels each cell
+  // by the pit it DRAINS to. gFix is the tiled flowdir field already restored to serial-identity at the seam
+  // (FLOWDIR-MATCH); tracing it down to a pit reconstructs serial's leaf label wherever gFix==serial (a
+  // per-cell measurement, DH_CCPASS_CEIL, bounds the residual: 0 on kerry_test9 sp7). So RE-DERIVE each
+  // cell's leaf by draining gFix to its pit, then recompute ONLY the marginal + total volumes on the FROZEN
+  // POST-collapse tree -- the serial-identical structure. Attributing on the pre-collapse tree is WRONG (its
+  // seam-artifact metas route the walk-up differently); the collapse must run first. A pit dissolved by the
+  // collapse is carried to its surviving leaf via collapse_map (pit2leaf_pre composed with the remap).
+  // STRUCTURE-PRESERVING: outlets/parent/lchild/rchild/out_elev are untouched, so a mis-labelled cell can
+  // only shift a FINITE cell_count between leaves (a caught VOL/SIG diff) -- never sever a spill path into an
+  // open depression (out_elev=inf -> NaN). Ocean at its flood label (cells draining to sea resolve to OCEAN
+  // and are skipped, as in serial) -- NOT -inf (the shortcut that sent basin rims to ocean). Default OFF.
+  if(ccpass){
+    // Trace gFix from (x,y) to a terminal: a NO_FLOW pit cell -> its POST-collapse leaf, or OCEAN if
+    // drainage steps into the sea. A traced pit not in pit2leaf_pre (unexpected) keeps the flood label.
+    const auto trace_leaf=[&](int x,int y)->dh_label_t{
+      for(unsigned g=0; g<=full.size(); g++){
+        const int8_t d=gFix(x,y);
+        if(d==rd::NO_FLOW){
+          const auto it=pit2leaf_pre.find((dh::flat_c_idx)full.xyToI(x,y));
+          return it!=pit2leaf_pre.end() ? collapse_map[it->second] : collapse_map[gLabel(x,y)];
+        }
+        const int nx=x+rd::d8x[d], ny=y+rd::d8y[d];
+        if(!full.inGrid(nx,ny) || is_ocean(nx,ny)) return OCEAN;   // drains to sea
+        x=nx; y=ny;
+      }
+      return collapse_map[gLabel(x,y)];                      // safety net (no cycle expected)
+    };
+    rd::Array2D<dh_label_t> ccLabel(full.width(), full.height(), OCEAN);
+    for(int y=0;y<full.height();y++) for(int x=0;x<full.width();x++){
+      if(full.isNoData(x,y) || gLabel(x,y)==OCEAN){ ccLabel(x,y)=OCEAN; continue; }
+      ccLabel(x,y)=trace_leaf(x,y);
+    }
+    for(dh_label_t i=0;i<G.size();i++){ G[i].cell_count=0; G[i].total_elevation=0; G[i].dep_vol=0; }
+    dh::CalculateMarginalVolumes<float>(G, full, ccLabel);
+    dh::CalculateTotalVolumes<float>(G);
+  }
 
   // ---- serial ground truth ----
   auto s_label = ocean_labels(full, ocean_level);
