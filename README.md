@@ -95,3 +95,46 @@ following output files:
  * `temp/out-graph.csv`: A CSV file showing the topological relationships of the depression hierarchy's depressions
 
 `<Ocean Level>` is the elevation of the ocean within the dataset All cells having this elevation are considered to be part of the ocean.
+
+Distributed (parallel) build — worked example: Corsica
+======================================================
+
+This fork adds a **distributed-memory (MPI) DepressionHierarchy build** so the DH
+can be computed for DEMs too large to hold on one node: the grid is tiled across
+ranks, each rank holds only `O(N/P) + O(boundary)`, and the per-tile results are
+stitched into one hierarchy. See `PARALLEL_DEPHIER_PLAN.md` and `ENHANCEMENTS.md`.
+
+The example below runs on **Corsica at GEBCO 30″** — the same clip the
+[Water Table Model (WTM)](https://github.com/KCallaghan/WTM) uses for its island
+example — so the depressions here are exactly the basins WTM's Fill-Spill-Merge
+fills with lakes.
+
+| | |
+|:---:|:---:|
+| ![Corsica topography](examples/corsica/corsica_topo.png) | ![Corsica depression hierarchy](examples/corsica/corsica_depressions.png) |
+| **Input:** GEBCO 30″, 156×240, land floored to ≥0.5 m, flat ocean at 0. | **Output:** 154 closed depressions. Dashed lines = a 3-tile parallel decomposition. |
+
+**Parallel vs. serial.** The distributed build is validated against the serial
+`GetDepressionHierarchy` as the differential oracle. On this clip:
+
+| build | depression tree | total depression volume | flat flowdirs |
+|---|---|---|---|
+| serial (1 tile) | 163 nodes (154 basins) | 4794 | — |
+| distributed, 2 tiles | 164 nodes | **4794 (=serial)** | `flat_diff=0` |
+| distributed, 3 tiles | **163 nodes (bit-identical)** | **4794 (=serial)** | `flat_diff=0` |
+| distributed, 4 tiles | 165 nodes | **4794 (=serial)** | `flat_diff=0` |
+
+Every tiling reproduces the serial build to the accepted bar — **correct depression
+volumes and a valid hierarchy** — with the per-rank flat resolution bit-identical
+to serial (`flat_diff=0`). The small tree-node differences at 2 and 4 tiles are the
+`ocean_linked` nesting order at tied outlets (a documented tie-break class, volume-
+preserving); the 3-tile decomposition is byte-for-byte identical.
+
+**Reproduce:**
+
+    python3 examples/corsica/make_corsica.py                 # regenerate corsica.tif from the WTM clip
+    ./build/dephier.exe examples/corsica/corsica.tif out/corsica 0   # serial DH + -label.tif
+    ./build/dephier_mpi.exe examples/corsica/corsica.tif 0 52,104    # distributed DH (3 tiles) vs serial
+
+The figures are produced from `out/corsica-label.tif` (the per-cell depression
+label the serial tool writes).
