@@ -37,6 +37,12 @@ if(USE_GDAL AND GDAL_FOUND)
   target_link_libraries(flat_mask_reconstruct_test.exe PRIVATE dephier richdem)
   add_test(NAME flat_mask_reconstruct COMMAND flat_mask_reconstruct_test.exe)
 
+  # ENH-2 pit-only seeding flag (permit_without_baselevel_seed): a seedless bowl-interior tile must
+  # throw with the flag off and flood from its pits with it on. Library-level, no GDAL needed.
+  add_executable(bowl_interior_seed_test.exe tools/bowl_interior_seed_test.cpp)
+  target_link_libraries(bowl_interior_seed_test.exe PRIVATE dephier richdem)
+  add_test(NAME bowl_interior_seed COMMAND bowl_interior_seed_test.exe)
+
   find_package(Threads REQUIRED)
   add_executable(comm_smoke.exe tools/comm_smoke.cpp)
   target_include_directories(comm_smoke.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
