@@ -1,5 +1,18 @@
 # Plan: flag-gated split-invariant flats (GitHub #3 / ENH-7)
 
+> **FULL IDENTITY IS ONE OUTLET-TIE-BREAK AWAY — root cause found + PROVEN (2026-07-29).** After the replay
+> closed the cell-assignment class (73→79/107 MATCH), characterized the 28 residual DIFFERs: all are
+> STITCH-LEAFSET-MATCH (committed `451073d`) — exactly serial's leaf depressions, difference is pure meta-tree
+> SHAPE (8 meta-ordering + 20 meta-vs-ocean_linked). Root cause (DH_AUDIT_VS_SERIAL, `d80c41d`): PhaseC's sort
+> is deterministic on (out_elev → **out_cell** → pit cells); the tiled outlets match serial in pairs + out_elev
+> but differ in out_cell — serial keeps the FIRST-DISCOVERED out_cell on a tie (flood-order, dephier.hpp:579),
+> the tiled scan keeps the LOWEST (tiling-independent, dh_outlets.hpp). At a tied out_elev this flips the sort.
+> **PROVEN (experiment, reverted): replay + a 1-line serial change to prefer the lowest out_cell on a tie =>
+> 107/107 STITCH-MATCH.** The change is serial-output-changing (Richard) but makes serial itself
+> split-invariant, and Barnes' own comment (dephier.hpp:42) already calls the tie "arbitrarily chosen." This is
+> lever B, now precisely scoped. Lever C = distribute the replay (ENH-1 seam-exchange). Old "lower cell wins
+> reproduces serial" claim is DISPROVEN — serial keeps flood-first, not lowest.
+
 > **ROAD A — flat-label PARTITION replay: rule DERIVED from the flood + (partially) VALIDATED (2026-07-29).**
 > Andy chose Road A (reproduce serial's flat-label partition locally, serial untouched). Derived the exact
 > rule from the flood (`dephier.hpp:481-536`) + the fork's radix_heap tie-break (`radix_heap.hpp:391-399`:
