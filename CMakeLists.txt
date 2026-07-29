@@ -31,6 +31,13 @@ if(USE_GDAL AND GDAL_FOUND)
   add_executable(dephier_flat_extent.exe tools/dephier_flat_extent.cpp)
   target_link_libraries(dephier_flat_extent.exe PRIVATE dephier richdem)
 
+  # ENH-7 prototype/measurement (issue #3): how much would a geometry-deterministic flat-LABEL rule
+  # (nearest depression pit over same-elevation flat, index tiebreak) change the serial labels? A tool,
+  # not a test -- prints the change count. Result on all test_cases at ocean 0: 0 changes on covered
+  # flat cells (serial's flood already labels flat floors by nearest-pit). See ENHANCEMENTS.md ENH-7.
+  add_executable(flat_relabel_prototype.exe tools/flat_relabel_prototype.cpp)
+  target_link_libraries(flat_relabel_prototype.exe PRIVATE dephier richdem)
+
   # Proves the label-free three-field reconstruction of Barnes-2014's flat_mask (the equivalence
   # the ENH-1 distributed flat resolution is built on). See the file header + ENHANCEMENTS.md ENH-1.
   add_executable(flat_mask_reconstruct_test.exe tools/flat_mask_reconstruct_test.cpp)
