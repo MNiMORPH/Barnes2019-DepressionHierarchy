@@ -474,6 +474,23 @@ int main(int argc, char **argv){
     flowdir_ok = (fdiff==0);
     std::cout<<(flowdir_ok ? "FLOWDIR-MATCH " : "FLOWDIR-DIFFER ")<<in_name
              <<" fd_diff="<<fdiff<<"/"<<land<<"\n";
+    // DEBUG: dump each flowdir divergence (coords, elev, dirs, seam/flat context). Set DH_DUMP_FDDIFF=1.
+    // The flowdir residual is the ROOT of the cell-assignment DIFFER class: a cell whose tiled
+    // deterministic drainage differs from serial drains to a different pit -> different leaf ->
+    // wrong cell_count/dep_vol. Use this to characterize the residual before the containment cc-pass.
+    if(std::getenv("DH_DUMP_FDDIFF")){
+      const auto is_flat_cell=[&](int x,int y){ const float e=full(x,y);
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=x+dx,ny=y+dy;
+          if(full.inGrid(nx,ny)&&!full.isNoData(nx,ny)&&full(nx,ny)<e) return false; } return true; };
+      for(int y=0;y<full.height();y++) for(int x=0;x<full.width();x++){
+        if(full.isNoData(x,y)) continue;
+        if(gFix(x,y)==s_fd(x,y)) continue;
+        const int t = tile_of(x);
+        const bool on_seam = (t>0 && x==bounds[t]) || (t+1<(int)bounds.size()-1 && x==bounds[t+1]-1);
+        std::cerr<<"  FDDIFF ("<<x<<","<<y<<") elev="<<full(x,y)<<" stitch_fd="<<(int)gFix(x,y)
+                 <<" serial_fd="<<(int)s_fd(x,y)<<(is_flat_cell(x,y)?" FLAT":"")<<(on_seam?" SEAM":"")<<"\n";
+      }
+    }
   }
 
   // ---- compare ----
@@ -488,6 +505,30 @@ int main(int argc, char **argv){
 
   const bool ok = (sig_stitch==sig_serial);
   std::cout<<(ok ? "STITCH-MATCH " : "STITCH-DIFFER ")<<in_name<<" splits="<<argv[3]<<"\n";
+
+  // DEBUG (DH_CCPASS_CEIL=1): would a containment cc-pass -- re-deriving each cell's leaf by tracing the
+  // (mostly-serial) fixed flowdirs gFix down to a pit -- reproduce serial's cell->pit drainage? Compare,
+  // namespace-free, the terminal pit CELL each cell reaches under gFix vs under serial's s_fd. Any mismatch
+  // is a cell the cc-pass would STILL mis-assign (its gFix trace runs through a residual seam flowdir diff),
+  // i.e. the cc-pass ceiling. If this is ~0 while leaf-assignment diffs are large, the cc-pass wins; if it
+  // tracks the leaf diffs, the seam FLOWDIR residual is the true blocker and the cc-pass cannot help.
+  if(std::getenv("DH_CCPASS_CEIL")){
+    const auto trace=[&](const rd::Array2D<int8_t>&fd,int x,int y)->long{
+      for(unsigned g=0; g<=full.size(); g++){ const int8_t d=fd(x,y);
+        if(d==rd::NO_FLOW) return full.xyToI(x,y);
+        const int nx=x+rd::d8x[d], ny=y+rd::d8y[d];
+        if(!full.inGrid(nx,ny)||full.isNoData(nx,ny)) return full.xyToI(x,y);
+        x=nx; y=ny; }
+      return full.xyToI(x,y); };
+    long land=0, pit_diff=0;
+    for(int y=0;y<full.height();y++) for(int x=0;x<full.width();x++){
+      if(full.isNoData(x,y)||s_label(x,y)==OCEAN) continue;
+      land++;
+      if(trace(gFix,x,y)!=trace(s_fd,x,y)) pit_diff++;
+    }
+    std::cerr<<"CCPASS-CEIL "<<in_name<<" splits="<<argv[3]<<": gFix-trace vs serial-trace pit mismatch="
+             <<pit_diff<<"/"<<land<<" (cc-pass residual floor; 0 => tracing gFix reproduces serial drainage)\n";
+  }
 
   // Decomposition-correctness diagnostic: the NODE COUNT. The depression tree is split-invariant -- a
   // correct build has the same depressions no matter where the seams fall -- so an unequal node count is a
