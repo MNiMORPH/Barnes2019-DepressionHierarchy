@@ -1,5 +1,13 @@
 # Plan: flag-gated split-invariant flats (GitHub #3 / ENH-7)
 
+> **⚠ SUPERSEDED / HISTORICAL (2026-07-30).** This is the working record of the split-invariant-flats
+> investigation, including two approaches that were tried and are now REMOVED from the code: *source-1*
+> (`DH_SPLIT_INVARIANT_FLATS`, subsumed by the replay) and the *containment cc-pass*
+> (`DH_CONTAINMENT_CCPASS`, validated-negative — it computes drainage, but serial's flat label is flood
+> membership). The approach that shipped is the flat-partition **replay** (`DH_FLAT_PARTITION_REPLAY`), now
+> the primary path, distributed per-rank in `dephier_mpi` as **ENH-8**. Current state lives in
+> `ENHANCEMENTS.md` (ENH-7/ENH-8) and `RICHARD_REVIEW_NOTES.md`; kept here as the dead-end record.
+
 > **FULL IDENTITY IS ONE OUTLET-TIE-BREAK AWAY — root cause found + PROVEN (2026-07-29).** After the replay
 > closed the cell-assignment class (73→79/107 MATCH), characterized the 28 residual DIFFERs: all are
 > STITCH-LEAFSET-MATCH (committed `451073d`) — exactly serial's leaf depressions, difference is pure meta-tree
