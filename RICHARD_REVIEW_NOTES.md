@@ -30,16 +30,31 @@ tree/labels for the affected cases, so they're yours to bless.
    optimization is a **composite radix key** (fold the cell index into the key so the radix orders by
    `(elevation, index)` with no per-bucket sort). Not yet done.
 
+3. **`PhaseAB` outlet `out_cell` tie-break** (`dephier.hpp`, outlet discovery — the last split-invariance
+   piece; 2026-07-29). When two connections between the same depression pair share the lowest `out_elev`,
+   the kept `out_cell` was whichever the flood reached FIRST (pop order) — traversal-order-dependent, so a
+   tiled build kept a *different* `out_cell` than the whole-grid flood on nearly every tied outlet. Since
+   your `PhaseC` sort breaks `out_elev` ties by `out_cell` (#1), that flips the tree at tied outlets → an
+   equally-valid but different meta hierarchy. Fix (one line): on an `out_elev` tie keep the **lowest-index**
+   `out_cell` — geometric, traversal-order-independent, the same rule the stitch's re-derived outlet scan
+   already uses. Your `Depression::out_cell` comment already called this tie "arbitrarily chosen"; this makes
+   the choice canonical, and makes **serial itself tiling-independent at tied outlets**.
+   **Effect (measured):** with this change *and* our exact reproduction of your flat labelling (see the
+   residual section — no serial change needed there), the tiled build is **bit-identical to serial on all
+   107 fixture×split cases** (was 79/107). Argument, not just data points: once both sides feed `PhaseC` the
+   same outlets and the leaf partition already matches, the deterministic sort yields identical trees by
+   construction. Our regression suite (assertions are serial-relative) still passes 25/25.
+
 ## Changes that PRESERVE serial output (FYI, verified byte-identical)
 
-3. **`GetDepressionHierarchy` split into `PhaseAB` + `PhaseCD`** (`dephier.hpp`).
+4. **`GetDepressionHierarchy` split into `PhaseAB` + `PhaseCD`** (`dephier.hpp`).
    `PhaseAB` = flood + outlet discovery, exposing `{depressions, outlets}`; `PhaseCD` = hierarchy
    assembly + volumes. `GetDepressionHierarchy` is retained as a thin serial wrapper (AB then CD) with
    the original signature. A distributed build runs `PhaseAB` per tile and one global `PhaseCD`.
    Verified: canonical signature identical before/after across all `test_cases` + synthetic trees, with
    a negative control (a deliberate perturbation moved 26/28 signatures).
 
-4. **`BOUNDARY` exterior label** (`dephier.hpp`).
+5. **`BOUNDARY` exterior label** (`dephier.hpp`).
    New sentinel `BOUNDARY = max-1` for cells that drain off a tile edge in a distributed build. It
    seeds/spreads through the flood exactly like the ocean (so the flood loop is unchanged) but is NOT a
    terminal sink — `PhaseCD` never sees it (the stitch reconciles it across tiles first). `PhaseAB`'s
@@ -85,6 +100,14 @@ three ways, and only one is really yours:
    flowdirs), which would make flat labelling split-invariant but **change serial labels** on flat-heavy
    DEMs? Or is the collapse/refinement model sufficient here and we leave it?
 
+   **→ RESOLVED (2026-07-29), and NOT by changing your labels — we reproduce them exactly.** Rather than a
+   new flat-LABEL rule, a full pit-up replay of *your* flood's label partition (seeds = ocean + every
+   cell with no strictly-lower neighbour; the radix `(elevation, index)` pop order) is provably
+   partition-identical to serial on 49 DEMs (all fixtures + Corsica + adversarial fractals). So the
+   cross-seam flat-label divergence closes by *matching* your algorithm, not altering it — no serial-label
+   change. (Today a full-grid pass behind a flag in the stitch; the distributed 1-column seam-exchange form,
+   replaying flood order across the seam, is engineering on our side, still not a serial change.)
+
 3. **Outlet-order meta-vs-`ocean_linked` with MATCHING labels — INVESTIGATED; it folds into #2, not #1.**
    A few cases (`kerry_test3`/`kerry_test7` split 3) have **0 raw-label diffs** — labels bit-identical to
    serial — yet `PhaseCD` builds a meta where serial builds an `ocean_linked` (a big elevation tie: three
@@ -99,6 +122,14 @@ three ways, and only one is really yours:
    without reproducing flood order. It is subsumed by the #2 question (a geometry-deterministic flat rule),
    **not** separately fixable on our side. (Correcting an earlier, too-optimistic note that called it fixable
    like #1 — the ENH-5 lesson cutting the other way.)
+
+   **→ RESOLVED (2026-07-29) by change #3 in the serial-changing list above.** The diagnosis here is exactly
+   right — "serial's flood breaks the outlet-cell tie by flood order, the geometric re-derivation by lowest
+   index, and those differ." The resolution is to make *serial* break it by lowest index too (the one-line
+   `PhaseAB` change), so both sides agree without the re-derivation having to reproduce flood order. With that
+   plus the flat-label reproduction (#2), the tiled build is bit-identical to serial on all 107 cases. This
+   *was* the whole residual: every remaining DIFFER, audited, had matching pairs + `out_elev` and differed
+   only in `out_cell`.
 
 ## Also for your review (shared-core input handling — ENH-6)
 
