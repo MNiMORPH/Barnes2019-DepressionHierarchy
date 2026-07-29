@@ -29,6 +29,7 @@
 #include "dh_canonical.hpp"   // dhtest::canonicalize / invariants (shared with the stitch)
 #include "dh_collapse.hpp"    // CollapseSeamArtifacts            (shared with the stitch)
 #include "dh_flats.hpp"       // resolve_flat_flowdirs[_*]        (shared with the stitch)
+#include "dh_outlets.hpp"     // OutletDB / outlet_scan_*         (shared with the stitch, ENH-5)
 
 #include <dephier/dephier.hpp>
 #include <richdem/common/Array2D.hpp>
@@ -317,41 +318,22 @@ int main(int argc, char **argv){
   // at a given elevation IS the lowest-index cell) as an order-INDEPENDENT rule, so the
   // distributed merge -- which visits pairs in rank order, not row-major -- picks the same cell.
   // It does not change serial/stitch output (row-major already yields the lowest index).
-  const auto reduce = [](std::map<OutKey,OutVal> &db, dh_label_t la, dh_label_t lb,
-                         float ea, int64_t ca, float eb, int64_t cb){
-    if(la==lb) return;
-    const float oe = (ea>=eb)? ea : eb; const int64_t oc = (ea>=eb)? ca : cb;
-    const auto key = std::minmax(la,lb);
-    const auto it = db.find({key.first,key.second});
-    if(it==db.end() || oe < it->second.first || (oe==it->second.first && oc < it->second.second))
-      db[{key.first,key.second}] = {oe,oc};
-  };
-  std::map<OutKey,OutVal> odb;
-  // Skip a cell only if NoData AND not OCEAN -- a NoData-as-OCEAN cell is a real base level whose
-  // adjacency to a land depression is a genuine basin->ocean outlet (mirrors the stitch fix 261bbcd;
-  // the whole harness re-derives outlets from resolved labels, so the same NoData-skip lived here too).
-  const auto skip_o = [&](int x,int y){ return full.isNoData(x,y) && gLabel_oracle_pc(x,y)!=OCEAN; };
-  for(int y=0;y<H;y++)
-    for(int x=0;x<W;x++){
-      if(skip_o(x,y)) continue;
-      for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
-        if(!dx && !dy) continue;
-        const int nx=x+dx, ny=y+dy;
-        if(!full.inGrid(nx,ny) || skip_o(nx,ny)) continue;
-        if(tile_of(nx)!=tile_of(x)) continue;             // cross-seam handled by HandleEdge
-        reduce(odb, gLabel_oracle_pc(x,y), gLabel_oracle_pc(nx,ny),
-               full(x,y), full.xyToI(x,y), full(nx,ny), full.xyToI(nx,ny));
-      }
-    }
-  for(size_t b=1;b+1<bounds.size();b++){
-    const int cA=bounds[b]-1, cB=bounds[b];
-    for(int y=0;y<H;y++){
-      if(skip_o(cA,y)) continue;
-      for(int ny=y-1;ny<=y+1;ny++){
-        if(ny<0 || ny>=H || skip_o(cB,ny)) continue;
-        reduce(odb, gLabel_oracle_pc(cA,y), gLabel_oracle_pc(cB,ny),
-               full(cA,y), full.xyToI(cA,y), full(cB,ny), full.xyToI(cB,ny));
-      }
+  // Re-derive the oracle outlet set from the resolved oracle labels via the shared scan (dh_outlets.hpp,
+  // ENH-5): intra-tile D8, then HandleEdge across each seam, reading the full grid. Same reduce + skip
+  // rules as the distributed path below and the stitch (that shared code is the whole point of ENH-5).
+  OutletDB<int64_t> odb;
+  {
+    const auto label  = [&](int x,int y){ return gLabel_oracle_pc(x,y); };
+    const auto elev   = [&](int x,int y){ return full(x,y); };
+    const auto cidx   = [&](int x,int y){ return (int64_t)full.xyToI(x,y); };
+    const auto nodata = [&](int x,int y){ return full.isNoData(x,y); };
+    outlet_scan_intra(odb, 0, W, W, H, label, elev, cidx, nodata,
+                      [&](int x,int nx){ return tile_of(x)==tile_of(nx); });
+    for(size_t b=1;b+1<bounds.size();b++){
+      const int cA=bounds[b]-1, cB=bounds[b];
+      outlet_scan_seam(odb, H,
+        [&](int y){return gLabel_oracle_pc(cA,y);},[&](int y){return full(cA,y);},[&](int y){return (int64_t)full.xyToI(cA,y);},[&](int y){return full.isNoData(cA,y);},
+        [&](int y){return gLabel_oracle_pc(cB,y);},[&](int y){return full(cB,y);},[&](int y){return (int64_t)full.xyToI(cB,y);},[&](int y){return full.isNoData(cB,y);});
     }
   }
 
@@ -527,21 +509,16 @@ int main(int argc, char **argv){
 
     // ---- distributed outlet set (eng-doc component 4) ----
     c::CommBarrier();                                            // separate the conduit gather from this one
-    // Intra-tile outlet DB: adjacencies whose neighbour is in THIS tile (local: own columns only).
-    std::map<OutKey,OutVal> myintra;
-    // Skip a cell only if NoData AND not OCEAN (mirrors skip_o / the stitch fix 261bbcd): a
-    // NoData-as-OCEAN cell's adjacency to a land depression is a real basin->ocean outlet.
-    const auto skip_d = [&](int lx,int ly){ return dem.isNoData(lx,ly) && glab_pc(lx,ly)!=OCEAN; };
-    for(int y=0;y<H;y++) for(int gx=x0;gx<x1;gx++){
-      if(skip_d(gx-x0,y)) continue;
-      for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
-        if(!dx && !dy) continue;
-        const int nx=gx+dx, ny=y+dy;
-        if(nx<x0||nx>=x1||ny<0||ny>=H) continue;                // same-tile neighbours only
-        if(skip_d(nx-x0,ny)) continue;
-        reduce(myintra, glab_pc(gx-x0,y), glab_pc(nx-x0,ny),
-               dem(gx-x0,y), (int64_t)y*W+gx, dem(nx-x0,ny), (int64_t)ny*W+nx);
-      }
+    // Intra-tile outlet DB via the shared scan (dh_outlets.hpp, ENH-5): adjacencies whose neighbour is in
+    // THIS tile (own columns only). Accessors take GLOBAL (x,y) and map to this tile's local arrays.
+    OutletDB<int64_t> myintra;
+    {
+      const auto label  = [&](int x,int y){ return glab_pc(x-x0,y); };
+      const auto elev   = [&](int x,int y){ return dem(x-x0,y); };
+      const auto cidx   = [&](int x,int y){ return (int64_t)y*W+x; };
+      const auto nodata = [&](int x,int y){ return dem.isNoData(x-x0,y); };
+      outlet_scan_intra(myintra, x0, x1, W, H, label, elev, cidx, nodata,
+                        [&](int /*x*/,int nx){ return nx>=x0 && nx<x1; });  // same tile == own columns
     }
     // HandleEdge across seams: send my LEFT edge column (resolved) to r-1; each rank runs the
     // match for its RIGHT seam using the neighbour's LEFT-edge strip. O(H) per seam.
@@ -550,19 +527,14 @@ int main(int argc, char **argv){
       for(int y=0;y<H;y++){ s.label[y]=glab_pc(0,y); s.elev[y]=dem(0,y); s.nodata[y]=dem.isNoData(0,y); }
       c::CommSend(s, r-1, TAG_RES_LEFT);
     }
-    std::map<OutKey,OutVal> myedgedb;
+    OutletDB<int64_t> myedgedb;
     if(r<ntiles-1){
       ResStrip nbr; c::CommRecv(nbr, r+1, TAG_RES_LEFT);
       const int cA=x1-1, cB=bounds[r+1];                        // own right edge / neighbour left edge (x1)
-      for(int y=0;y<H;y++){
-        if(skip_d(cA-x0,y)) continue;
-        for(int ny=y-1;ny<=y+1;ny++){
-          if(ny<0||ny>=H) continue;
-          if(nbr.nodata[ny] && nbr.label[ny]!=OCEAN) continue;  // NoData neighbour kept only if OCEAN
-          reduce(myedgedb, glab_pc(cA-x0,y), nbr.label[ny],
-                 dem(cA-x0,y), (int64_t)y*W+cA, nbr.elev[ny], (int64_t)ny*W+cB);
-        }
-      }
+      // Side A = my own right-edge column (local arrays); side B = the neighbour's exchanged LEFT-edge strip.
+      outlet_scan_seam(myedgedb, H,
+        [&](int y){return glab_pc(cA-x0,y);},[&](int y){return dem(cA-x0,y);},[&](int y){return (int64_t)y*W+cA;},[&](int y){return dem.isNoData(cA-x0,y);},
+        [&](int y){return nbr.label[y];},    [&](int y){return nbr.elev[y];}, [&](int y){return (int64_t)y*W+cB;},[&](int y){return (bool)nbr.nodata[y];});
     }
     // Gather per-rank DBs to rank 0; merge all intra (rank order), then all edge (rank order),
     // matching the stitch's "all intra-tile, then all seams" outlet order.
@@ -571,7 +543,7 @@ int main(int argc, char **argv){
       for(const auto &kv : db) v.push_back({ kv.first.first, kv.first.second, kv.second.first, kv.second.second });
       return v;
     };
-    std::vector<ORec> intra_vec=to_vec(myintra), edge_vec=to_vec(myedgedb);
+    std::vector<ORec> intra_vec=to_vec(myintra.db), edge_vec=to_vec(myedgedb.db);
     if(r==0){
       std::vector<std::vector<ORec>> intra_all(ntiles), edge_all(ntiles);
       intra_all[0]=intra_vec; edge_all[0]=edge_vec;
@@ -801,16 +773,16 @@ int main(int argc, char **argv){
   // Break out cell-only diffs (same pair, same outlet elevation, different equal-elev cell) --
   // those are order-dependent tie choices that may or may not perturb the final tree. ----
   long pair_missing=0, elev_diff=0, cell_only=0, extra=0;
-  for(const auto &kv : odb){
+  for(const auto &kv : odb.db){
     const auto it = outlet_db_dist.find(kv.first);
     if(it==outlet_db_dist.end()){ pair_missing++; continue; }
     if(it->second.first != kv.second.first)       elev_diff++;
     else if(it->second.second != kv.second.second) cell_only++;
   }
-  for(const auto &kv : outlet_db_dist) if(!odb.count(kv.first)) extra++;
+  for(const auto &kv : outlet_db_dist) if(!odb.db.count(kv.first)) extra++;
   const bool outlet_ok = (pair_missing==0 && elev_diff==0 && cell_only==0 && extra==0);
   std::cout<<(outlet_ok ? "MPI-OUTLET-MATCH " : "MPI-OUTLET-DIFFER ")<<in_name
-           <<" ranks="<<ntiles<<" pairs="<<odb.size()
+           <<" ranks="<<ntiles<<" pairs="<<odb.db.size()
            <<" missing="<<pair_missing<<" extra="<<extra
            <<" elev_diff="<<elev_diff<<" cell_only_diff="<<cell_only<<"\n";
 

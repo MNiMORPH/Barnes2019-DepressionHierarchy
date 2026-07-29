@@ -23,6 +23,7 @@
 #include "dh_canonical.hpp"
 #include "dh_collapse.hpp"   // CollapseSeamArtifacts       (shared with tools/dephier_mpi.cpp)
 #include "dh_flats.hpp"      // resolve_flat_flowdirs[_*]   (shared with tools/dephier_mpi.cpp)
+#include "dh_outlets.hpp"    // OutletDB / outlet_scan_*    (shared with tools/dephier_mpi.cpp, ENH-5)
 
 #include <dephier/dephier.hpp>
 #include <richdem/common/Array2D.hpp>
@@ -339,57 +340,26 @@ int main(int argc, char **argv){
   // drift by diffing this set against PhaseAB's tile.outlets -- see DH_AUDIT_OUTLETS below.
   std::vector<dh::Outlet<float>> outlets;
   {
-    std::map<std::pair<dh_label_t,dh_label_t>, std::pair<float,dh::flat_c_idx>> db;
-    const auto record = [&](dh_label_t la, dh_label_t lb,
-                            float ea, dh::flat_c_idx ca, float eb, dh::flat_c_idx cb){
-      if(la==lb) return;                          // same depression: not an outlet
-      float oelev; dh::flat_c_idx ocell;          // outlet = the higher of the pair
-      if(ea>=eb){ oelev=ea; ocell=ca; } else { oelev=eb; ocell=cb; }
-      const auto key = std::minmax(la, lb);
-      const auto it = db.find({key.first,key.second});
-      // Keep the pair's LOWEST out_elev; break an elevation TIE by the LOWER out_cell. The tie-break
-      // is load-bearing: this scan visits all intra-tile pairs THEN all seam pairs, so a pair whose
-      // lowest-elevation outlet sits on a seam could be first recorded from a higher-index intra cell
-      // and, without the tie, never replaced -- an order-dependent out_cell that diverges from serial's
-      // row-major first-seen (= lowest index). The explicit lower-cell rule makes it order-independent
-      // and serial-identical (fixes kerry_test4 splits 3/8/9; matches the mpi reduce()).
-      if(it==db.end() || oelev < it->second.first || (oelev==it->second.first && ocell < it->second.second))
-        db[{key.first,key.second}] = {oelev, ocell};
-    };
-
-    // Skip a cell only if it is NoData AND not OCEAN. A NoData-as-OCEAN cell is a real base level, so
-    // its adjacency to a land depression is a genuine basin->ocean outlet that must be recorded.
-    const auto skip = [&](int x,int y){ return full.isNoData(x,y) && gLabel(x,y)!=OCEAN; };
-
-    // Per-tile: adjacencies whose neighbour lies in the SAME tile.
-    for(int y=0;y<full.height();y++)
-      for(int x=0;x<full.width();x++){
-        if(skip(x,y)) continue;
-        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
-          if(!dx && !dy) continue;
-          int nx=x+dx, ny=y+dy;
-          if(!full.inGrid(nx,ny) || skip(nx,ny)) continue;
-          if(tile_of(nx)!=tile_of(x)) continue;   // cross-seam: handled below
-          record(gLabel(x,y), gLabel(nx,ny), full(x,y), full.xyToI(x,y),
-                                             full(nx,ny), full.xyToI(nx,ny));
-        }
-      }
-
-    // HandleEdge: match the two resolved perimeter strips at each seam (D8), exactly
-    // as Barnes' parallel priority-flood pairs edge cell i with neighbours i-1,i,i+1.
+    // Re-derive the outlet set from the resolved label grid via the shared scan (dh_outlets.hpp, ENH-5):
+    // intra-tile D8 adjacencies, then Barnes' HandleEdge across each internal seam. The reduce keeps the
+    // pair's lowest out_elev (tie -> lower out_cell), and outlet_skip drops a cell only if NoData-and-not-
+    // OCEAN -- the two rules that must match the mpi oracle/distributed scans (and once did not).
+    const int W = full.width(), H = full.height();
+    OutletDB<dh::flat_c_idx> odb;
+    const auto label  = [&](int x,int y){ return gLabel(x,y); };
+    const auto elev   = [&](int x,int y){ return full(x,y); };
+    const auto cidx   = [&](int x,int y){ return full.xyToI(x,y); };
+    const auto nodata = [&](int x,int y){ return full.isNoData(x,y); };
+    outlet_scan_intra(odb, 0, W, W, H, label, elev, cidx, nodata,
+                      [&](int x,int nx){ return tile_of(x)==tile_of(nx); });
     for(size_t b=1;b+1<bounds.size();b++){
       const int cA=bounds[b]-1, cB=bounds[b];     // the two columns straddling the seam
-      for(int y=0;y<full.height();y++){
-        if(skip(cA,y)) continue;
-        for(int ny=y-1;ny<=y+1;ny++){
-          if(ny<0 || ny>=full.height() || skip(cB,ny)) continue;
-          record(gLabel(cA,y), gLabel(cB,ny), full(cA,y), full.xyToI(cA,y),
-                                              full(cB,ny), full.xyToI(cB,ny));
-        }
-      }
+      outlet_scan_seam(odb, H,
+        [&](int y){return gLabel(cA,y);},[&](int y){return full(cA,y);},[&](int y){return full.xyToI(cA,y);},[&](int y){return full.isNoData(cA,y);},
+        [&](int y){return gLabel(cB,y);},[&](int y){return full(cB,y);},[&](int y){return full.xyToI(cB,y);},[&](int y){return full.isNoData(cB,y);});
     }
 
-    for(auto &kv : db){
+    for(auto &kv : odb.db){
       dh::Outlet<float> o;
       o.depa = kv.first.first; o.depb = kv.first.second;
       o.out_elev = kv.second.first; o.out_cell = kv.second.second;
