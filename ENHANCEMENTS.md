@@ -327,8 +327,16 @@ trips no existing assertion. Two correctness items to verify, not assume:
 
 ## ENH-5: consolidate the triplicated outlet re-derivation into one shared scan
 
-**Status:** follow-up, identified 2026-07-28 while fixing the NoData-as-ocean inf bug (ENH-2). Not urgent
-— a robustness / maintainability item that removes a class of drift bug.
+**Status:** DONE 2026-07-29 (`b110f0d`). Extracted `tools/dh_outlets.hpp` (`OutletDB<CellIdx>` +
+`outlet_skip` + `outlet_scan_intra`/`outlet_scan_seam`); the stitch, mpi oracle, and mpi distributed path
+all call it. Pure refactor, validated bit-identical (stitch sweep MATCH 75 unchanged; mpi OUTLET/TREE/VOL
+match; suite 22/22; real-MPI compiles). The consolidation itself SURFACED a drift bug it exists to prevent:
+the stitch `record()` lacked the mpi's explicit lower-out_cell tie-break, making its outlet scan
+order-dependent (intra-before-seam) — fixed first in `2948000` (MATCH 72→75; kerry_test4 splits 3/8/9
+DIFFER→MATCH, previously **misattributed** to the Richard-coordinated tie-break class). The cross-rank
+gather-merge `mrg()` keeps its own copy of the tie-break (a distinct reduction over already-reduced ORecs,
+not a cell scan) — left as is. **Originally identified** 2026-07-28 while fixing the NoData-as-ocean inf
+bug (ENH-2).
 
 **Type:** refactor / correctness-hardening.
 
