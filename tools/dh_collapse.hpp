@@ -70,8 +70,13 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
     for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
       if(!dx && !dy) continue;
       const int nx=px+dx, ny=py+dy;
-      if(!full.inGrid(nx,ny) || full.isNoData(nx,ny)) continue;
-      if(tile_of(nx)!=tile_of(px) && full(nx,ny)<=pe) return true;
+      if(!full.inGrid(nx,ny) || tile_of(nx)==tile_of(px)) continue;    // only cross-seam escapes
+      // A cross-tile NoData cell is OCEAN (base level, below any land pit) -- the escape the tile could
+      // not see; a cross-tile land cell at/below the pit is likewise an escape. Reading NoData as OCEAN
+      // here matches ocean_labels and the record() outlet scans (the collapse has no label grid). Without
+      // it, a coastal degenerate pit whose only lower neighbour is NoData-ocean across the seam is missed
+      // -- the split-dependent extra zero-volume leaf (e.g. Corsica pit(78,63) at split 78).
+      if(full.isNoData(nx,ny) || full(nx,ny)<=pe) return true;
     }
     return false;
   };
