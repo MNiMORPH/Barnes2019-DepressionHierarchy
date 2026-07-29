@@ -37,6 +37,19 @@
 > 0 crashes across all fixtures×splits. Only then chase serial identity (b). Narrow-green (kerry_test2) ≠
 > done. Every geometric shortcut so far passed narrow and broke broad — get the sweep before claiming.
 >
+> **KEY INSIGHT — VOLUME IS COMPUTED FROM STRUCTURE (the reconciliation, the strongest argument):**
+> `dep_vol = cell_count·out_elev − total_elevation`. So a STRUCTURAL break surfaces AS a volume anomaly: the
+> testdem8 NaN was an empty OPEN depression `(4,inf,0,-nan)` — my rim→ocean relabel SEVERED the basin's spill
+> path, orphaning a leaf with no outlet (out_elev=inf) and 0 cells → `0·inf = NaN`. Consequences that drive
+> the design: (i) FREEZING the tree makes the NaN class IMPOSSIBLE (every out_elev finite ⇒ dep_vol finite);
+> (ii) `VOL-MATCH` is a STRUCTURE check, not just a volume check — it caught the break instantly, so it is the
+> load-bearing (a)-sweep tripwire; (iii) with a frozen tree a labelling error can only shift a cell's marginal
+> volume between finite-out_elev leaves → a *finite* VOL-DIFFER (caught, recoverable), NEVER a NaN. That
+> downgrade — "broken tree" → "caught miscount" — is the entire reason source-2 must NOT touch structure.
+> CONTAINMENT rule for the cc-pass: a cell → the leaf it reaches by DETERMINISTIC drainage (ENH-1 flat
+> flowdirs + steepest descent), OCEAN AT ITS FLOOD/SENTINEL ELEVATION, not −∞ (the −∞ shortcut is exactly
+> what sent basin rims to ocean).
+>
 > **PROCESS NOTE:** a premature "success ✓" is a destabilising false anchor; state what was tested AND what
 > wasn't; hold green PROVISIONAL until verified at the real scope; ask "what would break this?" and check it
 > FIRST so reversals die in my verification, not Andy's model. And: a partial step is a KEPT rung — don't
