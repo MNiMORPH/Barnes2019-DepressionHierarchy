@@ -701,6 +701,24 @@ int main(int argc, char **argv){
   std::cout<<(vol_ok ? "STITCH-VOL-MATCH " : "STITCH-VOL-DIFFER ")<<in_name
            <<" splits="<<argv[3]<<" total_dep_vol(serial="<<v_s<<" stitch="<<v_d<<")\n";
 
+  // Leaf-set verdict (LEAFSET-MATCH/DIFFER): does the tiled build have EXACTLY serial's multiset of LEAF
+  // depressions -- same (pit_elev, out_elev, cell_count, dep_vol) -- ignoring the meta tree above them? This
+  // separates the residual DIFFER classes from a real bug: if the leaf sets MATCH but STITCH-DIFFERs, the
+  // ONLY difference is meta-tree SHAPE (the outlet-ordering + meta-vs-ocean_linked tie-break, both genuine
+  // PhaseC ties). A LEAFSET-DIFFER on a STITCH-DIFFER case would be an actual cell-assignment/basin residual.
+  {
+    const auto leafset=[&](const dh::DepressionHierarchy<float>&D){
+      std::vector<std::string> v;
+      for(dh_label_t i=1;i<D.size();i++){ const auto&d=D[i];
+        if(d.lchild==dh::NO_VALUE && d.rchild==dh::NO_VALUE)
+          v.push_back(dhtest::quant(d.pit_elev,4)+","+dhtest::quant(d.out_elev,4)+","
+                      +std::to_string(d.cell_count)+","+dhtest::quant(d.dep_vol,4)); }
+      std::sort(v.begin(),v.end()); return v; };
+    const auto ls=leafset(S), lg=leafset(G);
+    std::cout<<((ls==lg)?"STITCH-LEAFSET-MATCH ":"STITCH-LEAFSET-DIFFER ")<<in_name
+             <<" splits="<<argv[3]<<" leaves(serial="<<ls.size()<<" stitch="<<lg.size()<<")\n";
+  }
+
   // Split-invariance signature: a hash of the tiled build's own canonical tree, printed ALWAYS. Two runs
   // at DIFFERENT splits must print the same STITCH-SIG iff the build is split-invariant on this DEM (the
   // real acceptance metric -- "identical DH regardless of how we split" -- which does NOT reference serial;
