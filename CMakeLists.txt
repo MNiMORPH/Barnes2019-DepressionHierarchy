@@ -146,6 +146,18 @@ if(USE_GDAL AND GDAL_FOUND)
            COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test4.dem 0 3)
   set_tests_properties(stitch_decomp_diagnostic PROPERTIES PASS_REGULAR_EXPRESSION "STITCH-DECOMP-CORRECT ")
 
+  # Volume-correctness bar (VOL-MATCH) for cases that are NOT bit-identical to serial: the tie-break class
+  # is STITCH-DIFFER / DECOMP-INCORRECT but MUST stay volume-correct + valid-tree (the acceptance bar).
+  # kerry_test11 split 7 is such a case (meta-order tie-break, total_dep_vol 260458 == serial). An invariant
+  # lock: it bites if a future change sends the volume to inf (open depression) or a wrong total. The MPI
+  # case additionally exercises the distributed Phase D volume reduction (per-rank partials -> rank 0).
+  add_test(NAME stitch_tiebreak_volume
+           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test11.dem 0 7)
+  set_tests_properties(stitch_tiebreak_volume PROPERTIES PASS_REGULAR_EXPRESSION "STITCH-VOL-MATCH ")
+  add_test(NAME mpi_tiebreak_volume
+           COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test11.dem 0 7)
+  set_tests_properties(mpi_tiebreak_volume PROPERTIES PASS_REGULAR_EXPRESSION "MPI-VOL-MATCH ")
+
   install(TARGETS dephier.exe DESTINATION bin)
   install(TARGETS dephier_paper_tests.exe DESTINATION bin)
   install(TARGETS dephier_stats.exe DESTINATION bin)
