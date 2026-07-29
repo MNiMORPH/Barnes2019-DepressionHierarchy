@@ -456,6 +456,40 @@ Progress this session on the split-invariance program the diagnostic measures:
 
 ---
 
+## ENH-7: geometry-deterministic flat LABEL assignment (a deterministic label set)
+
+**Status:** noted for the future 2026-07-29 (not planned). Only needed if we ever want the distributed
+build's LABEL set (which depression each cell belongs to) to be split-invariant — the current bar is
+volume-correct + valid-tree, which does NOT require it. Coordinate with Richard (changes serial output).
+
+**Type:** determinism / split-invariance of the per-cell label field.
+
+### Problem
+The depression a FLAT cell is assigned to is a byproduct of the flood's pop order (`dephier.hpp` labels a
+cell as the first depression whose front reaches it). Richard's `radix_heap` fix (RICHARD_REVIEW_NOTES.md
+#2) made the pop order deterministic *within a tile* (equal-elevation cells pop in cell-index order), so a
+within-tile flat labels identically serial vs tiled. But **across a seam** the two floods still reach a
+flat's cells in different global orders, so the tiled build labels some flat cells into a different
+(equal-elevation, equally-valid) depression than the whole-grid flood. Measured residual (all VOL-MATCH,
+valid trees): `kerry_test2` split 3 = 12 cells, `kerry_test10` = 209, `kerry_test11` = 407, `kerry_test12`
+= 320. Where those relabelled cells sit on a saddle, they also re-binarize the tree (meta vs `ocean_linked`
+at a tied outlet) — the DECOMP-INCORRECT-but-volume-correct residual (the "class 2" of the 2026-07-29
+tie-break characterization; see RICHARD_REVIEW_NOTES.md and [[distributed-dh-stitch-state]]).
+
+### The idea (if we pursue it)
+Replace flood-order flat labelling with a GEOMETRY-deterministic rule — the label analog of what
+`resolve_flats` (Barnes-2014) already does for flat FLOWDIRS, and what ENH-1 distributes as
+order-independent relaxations. A flat cell's owning depression would be a deterministic function of the
+geometry (e.g. nearest lower outlet by the same away/towards gradient fields ENH-1 builds), independent of
+which flood front arrived first. Then flat labels are split-invariant by construction, no cross-seam order
+to reproduce. **Cost:** it CHANGES serial labels on flat-heavy DEMs (an improvement — removes latent
+flood-order dependence — but Richard's to bless, same bucket as the radix fix). Distributes over the same
+seam-exchange machinery ENH-1 uses. Only worth it if a downstream consumer needs a stable per-cell label
+field (e.g. exact lake-basin masks that must not shift with the tiling); the tree + volumes are already
+correct without it.
+
+---
+
 ## RESEARCH DIRECTION: lake ↔ drainage-network integration (CHONK-informed)
 
 **Status:** parked (2026-07-27). A research direction, not a bounded code task. Build when ready;
