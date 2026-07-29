@@ -46,8 +46,9 @@ struct Depression {
   //Flat index of the pit cell, the lowest cell in the depression. If more than
   //one cell shares this lowest elevation, then one is arbitrarily chosen.
   flat_c_idx pit_cell = NO_VALUE;
-  //Flat index of the outlet cell. If there is more than one outlet cell at this
-  //cell's elevation, then one is arbitrarily chosen.
+  //Flat index of the outlet cell. If more than one outlet cell shares the lowest
+  //outlet elevation, the LOWEST-index one is chosen -- a geometric, traversal-order-
+  //independent tie-break, so the hierarchy is identical serially or over tiles.
   flat_c_idx out_cell = NO_VALUE;
   //Parent depression. If both this depression and its neighbour fill up, this
   //parent depression is the one which will contain the overflow.
@@ -576,8 +577,15 @@ void GetDepressionHierarchyPhaseAB(
         const OutletLink olink(clabel,nlabel);      //Create outlet link (order of clabel and nlabel doesn't matter)
         if(outlet_database.count(olink)!=0){        //Determine if the outlet is already present
           auto &outlet = outlet_database.at(olink); //It was. Use the outlet link to get the outlet information
-          if(outlet.out_elev>out_elev){             //Is the previously stored link higher than the new one?
-            outlet.out_cell = out_cell;             //Yes. So update the link with new outlet cell
+          //Keep the lowest outlet; break an equal-elevation tie by the LOWEST out_cell. The tie-break is
+          //deliberate: without it the kept out_cell is whichever equal-elevation connection the flood reached
+          //FIRST (pop order), which depends on traversal order and so is not reproducible across a tiled /
+          //distributed build. Preferring the lowest-index out_cell is a purely geometric rule -- a function
+          //of the DEM and the partition, independent of how the domain is swept -- so the depression
+          //hierarchy is identical whether built serially or over tiles. (PhaseC then sorts on out_cell, so
+          //this choice propagates into the tree shape at tied outlets: see the sort comment below.)
+          if(outlet.out_elev>out_elev || (outlet.out_elev==out_elev && out_cell<outlet.out_cell)){
+            outlet.out_cell = out_cell;             //Update the link with the new (lower) outlet cell
             outlet.out_elev = out_elev;             //Also, update the outlet's elevation
           }
         } else {                                    //No preexisting link found; create a new one

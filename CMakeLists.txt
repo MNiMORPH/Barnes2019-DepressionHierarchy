@@ -195,6 +195,16 @@ if(USE_GDAL AND GDAL_FOUND)
                        ENVIRONMENT "DH_FLAT_PARTITION_REPLAY=1"
                        PASS_REGULAR_EXPRESSION "STITCH-MATCH ")
 
+  # Full identity needs BOTH the flat-partition replay AND serial's canonical lowest-out_cell tie-break
+  # (dephier.hpp PhaseAB). kerry_test2 split 2 is a meta-vs-ocean_linked tie that stays STITCH-DIFFER with the
+  # replay on until serial breaks the out_elev tie by lowest out_cell (shown to bite: with the old
+  # flood-first rule it is DIFFER even with the replay). Locks both fixes -- revert either -> STITCH-DIFFER.
+  add_test(NAME stitch_replay_outlet_tiebreak
+           COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test2.dem 0 2)
+  set_tests_properties(stitch_replay_outlet_tiebreak PROPERTIES
+                       ENVIRONMENT "DH_FLAT_PARTITION_REPLAY=1"
+                       PASS_REGULAR_EXPRESSION "STITCH-MATCH ")
+
   install(TARGETS dephier.exe DESTINATION bin)
   install(TARGETS dephier_paper_tests.exe DESTINATION bin)
   install(TARGETS dephier_stats.exe DESTINATION bin)
