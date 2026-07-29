@@ -115,6 +115,11 @@ if(USE_GDAL AND GDAL_FOUND)
   add_executable(flat_seam_feasibility.exe tools/flat_seam_feasibility.cpp)
   target_link_libraries(flat_seam_feasibility.exe PRIVATE dephier richdem)
 
+  # Lever C core (in-process de-risk): per-tile adaptive-halo replay + pit-index labelling (no seam stitch)
+  # reproduces serial's flat-label partition in the distributed shape; validates the ASSEMBLED partition == serial.
+  add_executable(flat_label_distributed.exe tools/flat_label_distributed.cpp)
+  target_link_libraries(flat_label_distributed.exe PRIVATE dephier richdem)
+
   # Boundary-behavior tests (PARALLEL_DEPHIER_PLAN.md section 6, differential oracle).
   # The tiled stitch must reproduce the serial DepressionHierarchy -- tree AND per-cell
   # flowdirs -- bit-identically. The `seam` fixture puts a depression pit straddling the
@@ -196,6 +201,11 @@ if(USE_GDAL AND GDAL_FOUND)
   # can stay local (no whole-domain gather).
   add_test(NAME flat_seam_feasibility
            COMMAND flat_seam_feasibility.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test5.dem 0 2 3 5 7)
+
+  # Lever C core: the distributed-shape flat-label algorithm reproduces serial's partition. kerry_test5
+  # split 3,6 (3 tiles, 16-wide straddling flat) is a good multi-seam exercise; exit 0 iff DIST-PARTITION-MATCH.
+  add_test(NAME flat_label_distributed
+           COMMAND flat_label_distributed.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test5.dem 0 3,6)
 
   # ROAD A integration: DH_FLAT_PARTITION_REPLAY reconstructs serial's exact cell->leaf partition, closing
   # the cell-assignment DIFFER class. kerry_test4 split 5 is STITCH-DIFFER without the flag and STITCH-MATCH
