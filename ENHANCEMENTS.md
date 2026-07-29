@@ -476,6 +476,13 @@ valid trees): `kerry_test2` split 3 = 12 cells, `kerry_test10` = 209, `kerry_tes
 at a tied outlet) — the DECOMP-INCORRECT-but-volume-correct residual (the "class 2" of the 2026-07-29
 tie-break characterization; see RICHARD_REVIEW_NOTES.md and [[distributed-dh-stitch-state]]).
 
+The SAME flood-order-on-flats root also drives the "class 3" cases (e.g. `kerry_test3`/`kerry_test7` split
+3), where the labels match serial exactly (0 raw-label diffs) but the OUTLET CELL of a flat saddle is
+chosen differently — serial's flood picks it by flood order, the geometric re-derivation by lowest index —
+so `PhaseC` re-binarizes meta vs `ocean_linked` (verified 2026-07-29: serial 10 outlets vs re-derived 5,
+on different elevation-6 rim cells). A geometry-deterministic flat rule that fixes the label assignment
+would fix the outlet-cell selection too; both are the same problem.
+
 ### The idea (if we pursue it)
 Replace flood-order flat labelling with a GEOMETRY-deterministic rule — the label analog of what
 `resolve_flats` (Barnes-2014) already does for flat FLOWDIRS, and what ENH-1 distributes as

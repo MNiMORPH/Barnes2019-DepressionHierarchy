@@ -85,12 +85,20 @@ three ways, and only one is really yours:
    flowdirs), which would make flat labelling split-invariant but **change serial labels** on flat-heavy
    DEMs? Or is the collapse/refinement model sufficient here and we leave it?
 
-3. **Outlet-order meta-vs-`ocean_linked` with MATCHING labels — we'll investigate first.** A few cases
-   (`kerry_test3`/`kerry_test7` split 3) have **0 raw-label diffs** — labels bit-identical to serial — yet
-   `PhaseCD` still builds a meta where serial builds an `ocean_linked` (a big elevation tie: three flat
-   stripes whose separating walls and the ocean frame are all at the same elevation). Since the labels
-   match and both call the same `PhaseCD`, this is an outlet-SET / tie-order difference, plausibly fixable
-   on our side like #1. We'll chase it before bringing it to you.
+3. **Outlet-order meta-vs-`ocean_linked` with MATCHING labels — INVESTIGATED; it folds into #2, not #1.**
+   A few cases (`kerry_test3`/`kerry_test7` split 3) have **0 raw-label diffs** — labels bit-identical to
+   serial — yet `PhaseCD` builds a meta where serial builds an `ocean_linked` (a big elevation tie: three
+   flat stripes whose separating walls and the ocean frame are all at the same elevation). We hoped this was
+   a fixable re-derivation tie like #1. It is not. Dumping both outlet sets (`kerry_test7` split 3): serial
+   has 10 outlets, the re-derivation 5, and they sit on **different cells** — serial's elevation-6 saddles
+   land at high rows (`(3,6)`,`(3,7)`,`(1,7)`), the re-derivation's at low rows (`(3,2)`,`(5,2)`,`(1,1)`).
+   The whole rim/wall is a flat at elevation 6, so *which* cell is "the" outlet between a pair is a tie that
+   serial's flood breaks by flood order and the geometric re-derivation breaks by lowest index — and those
+   differ. So this is the **same cross-seam flat / flood-order root as #2**, manifesting in outlet-CELL
+   selection rather than label assignment; the geometric re-derivation cannot reproduce serial's choice
+   without reproducing flood order. It is subsumed by the #2 question (a geometry-deterministic flat rule),
+   **not** separately fixable on our side. (Correcting an earlier, too-optimistic note that called it fixable
+   like #1 — the ENH-5 lesson cutting the other way.)
 
 ## Also for your review (shared-core input handling — ENH-6)
 
