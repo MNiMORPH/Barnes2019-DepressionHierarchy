@@ -595,7 +595,7 @@ flowdir tail. `DH_HALO_DIAG` (gated) reports the halo each rank grew.
 - Supersedes/continues **ENH-7** (the flat-label determinism, resolved in-process via the replay).
 - Sibling of **ENH-1** (the flat-FLOWDIR distribution) — but ENH-1 is O(boundary) relaxations; ENH-8 is
   O(cap·boundary) ordered replay, because labels are order-dependent and flowdirs are not.
-- Proven algorithm: `tools/flat_label_distributed.cpp`; feasibility: `tools/flat_seam_feasibility.cpp`.
+- Proven algorithm: `tools/flat_label_distributed.cpp` (the halo-bound feasibility guard `flat_seam_feasibility` it subsumed was retired).
 - Serial side already done: the `out_cell` tie-break (RICHARD_REVIEW_NOTES.md #3) + the replay
   (`serial-parallel-bitidentical` tag).
 
