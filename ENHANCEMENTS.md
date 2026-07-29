@@ -537,7 +537,7 @@ tiles), 0 volume errors**. (A first sweep reported "11 misses"; those were a SWE
 `ocean_level=0`, but `kerry_test.dem`'s base level is `-9999` and it has NO cell at 0, so at ocean 0 there
 is no base level and the UNTILED serial build aborts too, correctly. At its proper level `-9999` all 11
 `kerry_test.dem` tilings MATCH. Not a bowl-interior/ENH-2 case — serial-untiled aborting rules that out.)
-Validated under **real mpirun at 2/5 processes**. CTests `mpi_flat_replay_v2{,_chained,_canonical}`.
+Validated under **real mpirun at 2/5 processes**. CTests `mpi_flat_partition_replay`, `mpi_flat_replay_chained`, `mpi_flat_replay_canonical`.
 **v2 turned out STRICTLY MORE CORRECT than v1**, not merely lighter: adopting the stitch's proven
 canonicalisation (survivor = min global leaf label among leaves whose pit lies in the basin + a true-pit
 stamp, `dephier_stitch.cpp` rb2leaf) in place of v1's `glab(pit)` rule fixes tilings where v1 CRASHED
@@ -575,7 +575,7 @@ Footprint: O(band·boundary) gathered to rank 0 (not the whole grid). Correctnes
 Each rank fetches its OWN adaptive/capped halo via a **multi-column seam exchange chained across tiles** — a
 band (dem + pre-reconciliation glab + ocean flag) advances one tile per round (systolic forwarding), so a
 halo wider than one tile is relayed THROUGH the intervening ranks; rank 0's halo reaching 3 tiles on a
-5-tile fixture is exercised by `mpi_flat_replay_v2_chained`. The halo grows until the OWNED pit-labels are
+5-tile fixture is exercised by `mpi_flat_replay_chained`. The halo grows until the OWNED pit-labels are
 stable for TWO consecutive rounds (one is a coincidence on a wide flat) OR the cap, via an OR-reduce so all
 ranks loop in lockstep (a converged rank keeps relaying for others). Each rank then replays serial's
 pit-index flood partition over that halo and maps its owned cells to serial's partition via the stitch's
