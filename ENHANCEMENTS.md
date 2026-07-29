@@ -529,9 +529,9 @@ Serial's flat label is order-DEPENDENT (highest-index-first flood pop order), so
 
 ## ENH-8: distribute the flat-label REPLAY per-rank ("v2", fully O(cap·boundary))
 
-**Status:** designed 2026-07-29. **v1 (rank-0 gather-resolve-scatter) is being built now** in `dephier_mpi`;
-this entry is **v2 = the fully-distributed, no-rank-0-bottleneck form**, filed to keep the plan on a linear
-path. Not a blocker: v1 already gives the correct (serial-identical) distributed result; v2 is the footprint
+**Status:** designed 2026-07-29; filed as **GitHub issue #4** (MNiMORPH fork). **v1 (rank-0
+gather-resolve-scatter) is being built now** in `dephier_mpi`; this entry is **v2 = the fully-distributed,
+no-rank-0-bottleneck form**, filed to keep the plan on a linear path. Not a blocker: v1 already gives the correct (serial-identical) distributed result; v2 is the footprint
 optimization, exactly the way `PhaseCD` is v1-centralized with the fully-distributed 2016 join deferred.
 
 **Type:** performance / footprint (v1 is correctness-complete).
