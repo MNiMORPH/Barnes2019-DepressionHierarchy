@@ -54,6 +54,10 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
   const dh_label_t N = G.size();
   std::vector<char> dead(N, 0);
   int contracted = 0;
+  int meta_over_halves = 0;   // Pass B / B2 firings: the seam-DEPENDENT dissolutions we want to RETIRE
+                              // (a seam-split flat rebuilt as a meta-over-halves, dissolved with a
+                              // seam-chosen pit). Early flat unification (split-invariant-flats mode)
+                              // should drive this to zero; a nonzero count is warned below.
 
   const auto tile_of = [&](int x){ int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; };
 
@@ -132,7 +136,7 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
     G[P].lchild   = dh::NO_VALUE;
     G[P].rchild   = dh::NO_VALUE;
     dead[a] = 1; dead[b] = 1;
-    contracted += 2;
+    contracted += 2; meta_over_halves++;
   }
 
   // Pass B2 -- rim-fragment dissolve. Pass B handles a basin whose FLOOR straddles a seam (both halves
@@ -163,8 +167,18 @@ inline int CollapseSeamArtifacts(dh::DepressionHierarchy<float> &G,
     G[P].lchild   = dh::NO_VALUE;
     G[P].rchild   = dh::NO_VALUE;
     dead[art] = 1; dead[real] = 1;
-    contracted += 2;
+    contracted += 2; meta_over_halves++;
   }
+
+  // Retirement warning: a meta-over-halves dissolution is seam-DEPENDENT (its pit is a seam-chosen
+  // representative, and whether it even fires depends on how the seam cut the flat -- so it does a
+  // different amount of work per tiling). It is a bridge we want to remove by unifying seam-split flats
+  // EARLY (before the meta forms); when that mode fully catches them this count is 0. See
+  // SPLIT_INVARIANT_FLATS_PLAN.md.
+  if(meta_over_halves>0)
+    std::cerr<<"WARNING: collapse dissolved "<<meta_over_halves<<" meta-over-halves seam artifact(s) "
+             <<"(seam-dependent; should retire via early split-invariant flat unification)\n";
+
   if(contracted==0) return 0;
 
   // resolve(x) -- follow the parent chain up until a LIVE node. Artifacts are always
