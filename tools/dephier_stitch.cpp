@@ -460,6 +460,12 @@ int main(int argc, char **argv){
   std::cout<<(vol_ok ? "STITCH-VOL-MATCH " : "STITCH-VOL-DIFFER ")<<in_name
            <<" splits="<<argv[3]<<" total_dep_vol(serial="<<v_s<<" stitch="<<v_d<<")\n";
 
+  // Split-invariance signature: a hash of the tiled build's own canonical tree, printed ALWAYS. Two runs
+  // at DIFFERENT splits must print the same STITCH-SIG iff the build is split-invariant on this DEM (the
+  // real acceptance metric -- "identical DH regardless of how we split" -- which does NOT reference serial;
+  // a valid tie-break vs serial keeps STITCH-MATCH DIFFER but leaves STITCH-SIG invariant across tilings).
+  std::cout<<"STITCH-SIG "<<in_name<<" splits="<<argv[3]<<" sig="<<std::hash<std::string>{}(sig_stitch)<<"\n";
+
   if(!ok){
     // Localize the divergence. `pit_of` identifies the depression a cell belongs to
     // by that depression's pit cell (label-namespace-independent). raw (walk=false):

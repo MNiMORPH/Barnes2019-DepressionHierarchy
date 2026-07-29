@@ -153,6 +153,14 @@ if(USE_GDAL AND GDAL_FOUND)
            COMMAND dephier_stitch.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test4.dem 0 2)
   set_tests_properties(stitch_decomp_diagnostic PROPERTIES PASS_REGULAR_EXPRESSION "STITCH-DECOMP-CORRECT ")
 
+  # Split-invariance = the real acceptance metric (serial-free): the tiled build must produce the SAME tree
+  # at different tilings. tools/check_split_invariance.sh compares STITCH-SIG across splits. kerry_test7 is
+  # split-invariant (it differs from serial only by a deterministic tie-break, yet is identical across
+  # tilings); lock that it stays so. The known split-VARIANT cases (kerry_test2/10/11) are the open target.
+  add_test(NAME split_invariance_kerry7
+           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_split_invariance.sh
+                   $<TARGET_FILE:dephier_stitch.exe> ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test7.dem 0 2 3 5 7)
+
   # Volume-correctness bar (VOL-MATCH) for cases that are NOT bit-identical to serial: the tie-break class
   # is STITCH-DIFFER / DECOMP-INCORRECT but MUST stay volume-correct + valid-tree (the acceptance bar).
   # kerry_test11 split 7 is such a case (meta-order tie-break, total_dep_vol 260458 == serial). An invariant
