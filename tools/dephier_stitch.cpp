@@ -32,11 +32,15 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <cmath>
 #include <limits>
 #include <map>
+#include <numeric>
+#include <queue>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rd = richdem;
@@ -338,6 +342,57 @@ int main(int argc, char **argv){
   // `continue` on all NoData cells and drop it, leaving the basin unclosed (inf volume). The `skip()`
   // below closes that gap (skip a cell only if NoData AND not OCEAN). A debug flag audits for further
   // drift by diffing this set against PhaseAB's tile.outlets -- see DH_AUDIT_OUTLETS below.
+  // ---- SPLIT-INVARIANT FLATS: early seam-split-flat unification (flag-gated; SPLIT_INVARIANT_FLATS_PLAN.md) ----
+  // Opt-in reproducibility mode (Andy: retire the collapse's seam-dependent meta-over-halves handling). A
+  // depression-FLOOR flat cut by a seam is otherwise rebuilt per-tile as multiple leaves and later dissolved
+  // by the collapse (Pass B/B2) with a seam-chosen pit -- seam-dependent. Instead, EARLY (before outlet
+  // re-derivation / PhaseCD / collapse) treat each connected same-elevation FLOOR flat (is_flat = no
+  // strictly-lower D8 neighbour; sills excluded) as ONE depression: merge every leaf whose pit lies in it
+  // into one canonical leaf, relabel its cells, and COMPACT G (dropping the emptied leaves). The
+  // meta-over-halves then never forms -> the collapse warning goes to zero (retired) for these flats.
+  // pit_cell is not in the canonical signature, so the representative choice is irrelevant. Full-grid here
+  // (the flag's speed/reproducibility trade); distributable later via ENH-1's seam-exchange relaxation.
+  // Default OFF => byte-identical to today. Divide-cell ties between ADJACENT depressions are deliberately
+  // NOT addressed here (Andy: we don't want that "source 2").
+  if(std::getenv("DH_SPLIT_INVARIANT_FLATS")){
+    const int W=full.width(), H=full.height();
+    const auto is_flat=[&](int x,int y){ if(full.isNoData(x,y)) return false; const float e=full(x,y);
+      for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=x+dx,ny=y+dy;
+        if(full.inGrid(nx,ny)&&!full.isNoData(nx,ny)&&full(nx,ny)<e) return false; } return true; };
+    std::map<dh::flat_c_idx,dh_label_t> pit2leaf;
+    for(dh_label_t i=1;i<G.size();i++) if(G[i].pit_cell!=dh::NO_VALUE) pit2leaf[G[i].pit_cell]=i;
+
+    std::vector<dh_label_t> merge(G.size()); std::iota(merge.begin(), merge.end(), (dh_label_t)0);
+    std::vector<char> seen((size_t)W*H, 0);
+    int regions=0, relabeled=0;
+    for(int sy=0;sy<H;sy++) for(int sx=0;sx<W;sx++){
+      if(seen[(size_t)sy*W+sx] || !is_flat(sx,sy) || gLabel(sx,sy)==OCEAN) continue;
+      const float e=full(sx,sy);
+      std::vector<std::pair<int,int>> region; std::queue<std::pair<int,int>> q;
+      q.push({sx,sy}); seen[(size_t)sy*W+sx]=1;
+      std::vector<dh_label_t> native;
+      while(!q.empty()){ auto [cx,cy]=q.front(); q.pop(); region.push_back({cx,cy});
+        const auto it=pit2leaf.find((dh::flat_c_idx)full.xyToI(cx,cy)); if(it!=pit2leaf.end()) native.push_back(it->second);
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=cx+dx,ny=cy+dy;
+          if(!full.inGrid(nx,ny)||full.isNoData(nx,ny)) continue; if(full(nx,ny)!=e||!is_flat(nx,ny)) continue;
+          if(!seen[(size_t)ny*W+nx]){ seen[(size_t)ny*W+nx]=1; q.push({nx,ny}); } } }
+      regions++;
+      if(native.empty()) continue;
+      const dh_label_t canon = *std::min_element(native.begin(), native.end());
+      for(dh_label_t L : native) merge[L]=canon;
+      for(auto [cx,cy] : region) if(gLabel(cx,cy)!=canon){ gLabel(cx,cy)=canon; relabeled++; }
+    }
+    // Compact: keep surviving leaves (merge[i]==i), renumber densely, remap gLabel + G.
+    std::vector<dh_label_t> dense(G.size(), 0); dh_label_t next=0;
+    for(dh_label_t i=0;i<G.size();i++) if(merge[i]==i) dense[i]=next++;
+    dh::DepressionHierarchy<float> G2(next);
+    for(dh_label_t i=0;i<G.size();i++) if(merge[i]==i){ G2[dense[i]]=G[i]; G2[dense[i]].dep_label=dense[i]; }
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(gLabel(x,y)!=OCEAN) gLabel(x,y)=dense[merge[gLabel(x,y)]];
+    G = std::move(G2);
+    std::cerr<<"SPLIT-INVARIANT-FLATS: "<<regions<<" floor-flats, relabeled "<<relabeled
+             <<" cells, leaves "<<merge.size()<<"->"<<next<<"\n";
+  }
+
   std::vector<dh::Outlet<float>> outlets;
   {
     // Re-derive the outlet set from the resolved label grid via the shared scan (dh_outlets.hpp, ENH-5):
