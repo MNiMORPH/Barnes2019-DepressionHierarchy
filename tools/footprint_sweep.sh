@@ -5,8 +5,10 @@
 # WHY: the flat replay's ADAPTIVE (uncapped) halo grows until each owned cell's replay label is
 # stable, i.e. until the window reaches that cell's basin pit -- which on real terrain can be most of
 # the grid. So the uncapped mode is bit-identical to serial but NOT footprint-bounded. A finite halo
-# cap (4th CLI arg) bounds the footprint to owned_cols + 2*cap at the risk of no longer reproducing
-# serial's exact tree inside basins wider than the cap. This sweep measures both axes.
+# cap (4th CLI arg) bounds the footprint to owned_cols + 2*cap, but then only reproduces a VALID,
+# volume-correct tree -- and bit-identity to serial is NON-MONOTONIC in the cap (a bigger halo is not
+# reliably "more serial-identical"; see Sweep C). Sweeps: A = footprint/exactness vs cap; B = footprint
+# vs tile count; C = exactness vs cap across terrain roughness (the non-monotonicity).
 #
 # Metric: DH_HALO_DIAG prints, per rank, owned_cols (= W/ntiles, the O(N/P) baseline) and held_cols
 # (owned + halo = the peak transient footprint of the replay). We report the PEAK held_cols across
@@ -70,3 +72,33 @@ for nt in 2 4 8; do
   read -r held owned tree fd < <(run "$(splits $nt)" 16)
   printf "%-10s %-16s %-16s %-16s %s\n" "$nt" "$owned" "$held" "$tree" "$fd"
 done
+
+# Sweep C -- how bit-identity (MPI-TREE-MATCH) vs the cap varies with terrain roughness (beta). Generates
+# its own beta-varied fractals, so it needs make_synthetic_dem.py (WTM_DIR); skipped if unavailable.
+# Legend: M = MATCH (bit-identical); D = DIFFER but VOL-MATCH (valid, volume-correct, not serial-identical);
+# ! = DIFFER *and* VOL-DIFFER (a real problem -- should never appear).
+echo
+echo "## Sweep C -- exactness vs cap across terrain roughness beta, ntiles=8 (M=match, D=differ-but-valid, !=bad)"
+if python3 "$REPO/tools/make_synthetic_dem.py" --help >/dev/null 2>&1; then
+  SPEC8=$(splits 8)
+  printf "%-16s %s\n" "beta" "cap:  inf  64  32  16   8   4   2"
+  for b in 1.0 1.5 2.0 2.5; do
+    demb=$(mktemp --suffix=.dem)
+    if python3 "$REPO/tools/make_synthetic_dem.py" --size "$W" --beta "$b" --seed 1 -o "$demb" >/dev/null 2>&1; then
+      row=""
+      for cap in "" 64 32 16 8 4 2; do
+        out=$(DH_FLAT_PARTITION_REPLAY=1 "$BIN" "$demb" 0 "$SPEC8" $cap 2>/dev/null || true)
+        t=$(grep -oE 'MPI-TREE-(MATCH|DIFFER)' <<<"$out" | head -1)
+        v=$(grep -oE 'MPI-VOL-(MATCH|DIFFER)' <<<"$out" | head -1)
+        if   [[ "$t" == *MATCH ]]; then c=M
+        elif [[ "$v" == *MATCH ]]; then c=D
+        else c='!'; fi
+        row+="   $c"
+      done
+      printf "%-16s %s\n" "$b" "cap: $row"
+    else printf "%-16s (generation failed)\n" "$b"; fi
+    rm -f "$demb"
+  done
+else
+  echo "   (skipped -- make_synthetic_dem.py unavailable; needs WTM_DIR)"
+fi

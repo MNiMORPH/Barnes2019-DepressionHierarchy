@@ -43,18 +43,36 @@ own DEM: `tools/footprint_sweep.sh my.dem`).
 | 4 | 64  | 96  | MATCH | fd_diff=0 |
 | 8 | 32  | 64  | MATCH | fd_diff=0 |
 
+### Sweep C — exactness vs. cap across terrain roughness (β), `ntiles=8`
+
+Whether a *capped* run reproduces serial's tree bit-for-bit (`MPI-TREE-MATCH`) vs. produces a valid but
+different tree (`MPI-TREE-DIFFER`), swept over spectral roughness β (higher β = smoother/larger-scale
+features). `held_cols` is identical to Sweep A (terrain-independent: `owned + 2·cap`), and **every
+`DIFFER` cell below is still `MPI-VOL-MATCH`** — a valid, volume-correct tree, not a wrong one.
+
+| β (256², seed 1) | ∞ | 64 | 32 | 16 | 8 | 4 | 2 |
+|------------------|---|----|----|----|---|---|---|
+| 1.0 (rough)      | M | M | M | M | M | M | **D** |
+| 1.5              | M | M | M | M | M | **D** | D |
+| 2.0              | M | M | M | M | **D** | M | M |
+| 2.5 (smooth)     | M | M | M | M | M | M | M |
+
+Read the β=2.0 row carefully: `cap=8` **DIFFER** but `cap=4` **MATCH** — deterministic (5/5 each).
+
 ### Takeaways
 
 - **Uncapped replay is exact but not footprint-bounded.** The default (∞) halo grew to 224/256 columns
   (88% of the grid) even on ordinary fractal terrain — a single rank ends up holding most of the grid.
-- **A finite cap bounds the footprint linearly:** `held_cols = owned_cols + 2·cap`, confirmed exactly by
-  Sweep B (e.g. 32 + 2·16 = 64). Per-rank footprint is `O(N/P) + O(cap)`.
-- **Exactness has a per-DEM cap threshold.** On this DEM the tree stayed **bit-identical** down to `cap=8`
-  (holding only 19% of `W`) and first diverged at `cap=4`. So a modest cap buys a ~4–5× footprint cut at
-  *zero* exactness cost — a cap of ~8–16 is a good default here, and worth setting rather than leaving
-  the halo unbounded.
+- **A finite cap bounds the footprint linearly and terrain-independently:** `held_cols = owned_cols + 2·cap`,
+  confirmed exactly by Sweeps B and C. Per-rank footprint is `O(N/P) + O(cap)`.
+- **Exactness is NON-MONOTONIC in the cap, and has no terrain-independent safe threshold.** A *larger* halo
+  is not reliably "more serial-identical": β=2.0 gives the exact serial tree at `cap=4` but a different
+  (valid) one at `cap=8`. Different caps resolve different seam-straddling basins, so bit-identity is a
+  jagged function of the cap × terrain × tiling. (A single-terrain sweep can look like a clean threshold —
+  Sweep A does — but that is a coincidence of that terrain, not a rule.)
+- **The cap is a footprint/validity knob, not a footprint/exactness dial.** For guaranteed bit-identity,
+  use *uncapped* (or, if you happen to know it, a cap ≥ the widest seam-straddling basin). A finite cap
+  always yields a **valid, volume-correct** tree (`VOL-MATCH`) with a bounded footprint — but do not expect
+  it to converge monotonically to serial as you raise it.
 - Flowdirs are unaffected by the flat-replay cap (`fd_diff=0` throughout — flowdirs come from the separate
   flat-flowdir pass).
-
-The right cap is DEM-dependent (it scales with the widest basin that must be reconciled across a seam);
-the sweep is the way to pick it for a given tiling and terrain.
