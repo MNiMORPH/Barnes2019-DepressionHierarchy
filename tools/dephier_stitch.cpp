@@ -464,9 +464,37 @@ static void construct_hierarchy(StitchState &st, bool flat_replay){
   }
 }
 
+static void print_usage(const char *prog){
+  std::cout <<
+    "Usage: "<<prog<<" <Input DEM> <Ocean Level> <Split Cols> [Flat Halo Cap]\n"
+    "\n"
+    "In-process tiled DepressionHierarchy 'stitch': builds the hierarchy from column\n"
+    "tiles and diffs it against a full-grid serial build (validation harness).\n"
+    "\n"
+    "Positional arguments:\n"
+    "  <Input DEM>      Raster readable by GDAL.\n"
+    "  <Ocean Level>    Elevation at/below which a cell (or any NoData cell) is ocean\n"
+    "                   / base level.\n"
+    "  <Split Cols>     Comma-separated interior column indices to cut into tiles\n"
+    "                   (e.g. \"2,4,6\" -> 4 tiles).\n"
+    "  [Flat Halo Cap]  Optional. Max halo columns per side for the adaptive-halo flat\n"
+    "                   resolution. Default: unbounded = bit-identical to serial. A\n"
+    "                   finite cap bounds the footprint but may not be serial-identical\n"
+    "                   inside flats wider than the cap.\n"
+    "\n"
+    "Modes (environment variables; set to any value to enable):\n"
+    "  DH_FLAT_PARTITION_REPLAY  Reproduce serial's EXACT flat-label partition so the\n"
+    "                            tree is bit-identical to serial. Default off.\n"
+    "  DH_AUDIT_OUTLETS          Diff the re-derived outlet set against the per-tile\n"
+    "                            flood's own outlets (drift check).\n"
+    "  DH_AUDIT_VS_SERIAL        Diff the tiled outlet set against a fresh serial\n"
+    "                            flood's outlets (tie-break diagnostics).\n";
+}
+
 int main(int argc, char **argv){
+  if(argc>=2){ const std::string a1=argv[1]; if(a1=="-h" || a1=="--help"){ print_usage(argv[0]); return 0; } }
   if(argc!=4 && argc!=5){
-    std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
+    print_usage(argv[0]);
     return -1;
   }
   const std::string in_name     = argv[1];
