@@ -155,6 +155,60 @@ struct FlatComm {
   }
 };
 
+// Per-rank state + shared environment for the distributed build, so the pipeline reads as a sequence of
+// stage(ctx, ...) calls instead of one ~500-line lambda. The environment refs (full/bounds/dims) are
+// identical on every rank; the arrays/objects are this rank's own, produced as the stages run. The
+// halo-aware accessors (elev/is_ocean/drain_local, over own columns + the two 1-column halos) and tile_of
+// are the utilities the stages share.
+struct RankCtx {
+  const rd::Array2D<float>& full;              // environment (same on every rank)
+  const std::vector<int>&   bounds;
+  int   W, H, ntiles;
+  float ocean_level;
+  int   halo_cap;
+  int   r, x0, x1, w;                          // this rank's tile: columns [x0,x1), width w
+  rd::Array2D<float>              dem;          // per-rank state, filled as the pipeline runs
+  rd::Array2D<dh_label_t>         label, glab, glab_pc;
+  rd::Array2D<int8_t>             fd, gfix;
+  dh::DepressionHierarchy<float>  deps;
+  std::vector<dh::Outlet<float>>  outlets;
+  dh_label_t                      myoffset = 1;
+  EdgeStrip                       haloL, haloR;
+
+  RankCtx(const rd::Array2D<float>& full_, const std::vector<int>& bounds_, int W_, int H_, int ntiles_,
+          float ocean_level_, int halo_cap_, int rank)
+    : full(full_), bounds(bounds_), W(W_), H(H_), ntiles(ntiles_), ocean_level(ocean_level_),
+      halo_cap(halo_cap_), r(rank), x0(bounds_[rank]), x1(bounds_[rank+1]), w(bounds_[rank+1]-bounds_[rank]) {}
+
+  int tile_of(int x) const { int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; }
+  float elev(int gx,int y) const {
+    if(gx>=x0 && gx<x1) return dem(gx-x0,y);
+    if(gx==x0-1)        return haloL.elev[y];
+    return haloR.elev[y];                       // gx==x1
+  }
+  bool is_ocean(int gx,int y) const {
+    if(gx>=x0 && gx<x1) return dem.isNoData(gx-x0,y) || dem(gx-x0,y)==ocean_level;
+    if(gx==x0-1)        return haloL.ocean[y];
+    return haloR.ocean[y];
+  }
+  // Lowest strictly-downhill in-window neighbour (own cols + halos); <= so the higher-index tie wins,
+  // matching the flood's radix pop order. to_ocean set if any neighbour is ocean.
+  bool drain_local(int gx,int y,int &lx,int &ly,bool &to_ocean) const {
+    const float focal = elev(gx,y);
+    float best = std::numeric_limits<float>::infinity(); bool found=false; to_ocean=false;
+    for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+      if(!dx && !dy) continue;
+      const int nx=gx+dx, ny=y+dy;
+      if(nx<0||nx>=W||ny<0||ny>=H) continue;
+      if(is_ocean(nx,ny)){ to_ocean=true; continue; }
+      const float e = elev(nx,ny);
+      if(e >= focal) continue;
+      if(e <= best){ best=e; lx=nx; ly=ny; found=true; }
+    }
+    return found;
+  }
+};
+
 int main(int argc, char **argv){
   commt::CommStartup();                      // process lifecycle (MPI_Init; no-op for the shim). Must
                                              // precede any CommRank/Size. Matched CommShutdown at the ends.
@@ -373,8 +427,15 @@ int main(int argc, char **argv){
   auto rank_main = [&](){
     const int r  = c::CommRank();
     const int x0 = bounds[r], x1 = bounds[r+1], w = x1-x0;
-    rd::Array2D<float>      dem   = extract_cols(full, x0, x1);   // this rank's own columns only
-    rd::Array2D<dh_label_t> label = ocean_labels(dem, ocean_level);
+    RankCtx ctx(full, bounds, W, H, ntiles, ocean_level, halo_cap, r);
+    // Reference-aliases into ctx so the existing body reads unchanged while stages are lifted out
+    // incrementally (extracted stages take ctx and use ctx.* directly). Removed once all stages are out.
+    auto& dem=ctx.dem; auto& label=ctx.label; auto& fd=ctx.fd; auto& glab=ctx.glab;
+    auto& glab_pc=ctx.glab_pc; auto& gfix=ctx.gfix; auto& deps=ctx.deps; auto& outlets=ctx.outlets;
+    auto& myoffset=ctx.myoffset; auto& haloL=ctx.haloL; auto& haloR=ctx.haloR;
+
+    dem   = extract_cols(full, x0, x1);                          // this rank's own columns only
+    label = ocean_labels(dem, ocean_level);
 
     // Build this rank's edge strips and exchange with seam neighbours (non-blocking send
     // into the neighbour's inbox, then blocking recv -- no deadlock).
@@ -385,36 +446,13 @@ int main(int argc, char **argv){
     };
     if(r+1<ntiles) c::CommSend(strip_of(w-1), r+1, TAG_L2R);      // my right edge -> r+1's left halo
     if(r-1>=0)     c::CommSend(strip_of(0),   r-1, TAG_R2L);      // my left  edge -> r-1's right halo
-    EdgeStrip haloL, haloR;
     if(r-1>=0)     c::CommRecv(haloL, r-1, TAG_L2R);              // column x0-1
     if(r+1<ntiles) c::CommRecv(haloR, r+1, TAG_R2L);              // column x1
 
-    // Local elevation/ocean access over [x0-1, x1] (own columns + the two halos).
-    const auto elev = [&](int gx,int y)->float{
-      if(gx>=x0 && gx<x1) return dem(gx-x0,y);
-      if(gx==x0-1)        return haloL.elev[y];
-      return haloR.elev[y];                                       // gx==x1
-    };
-    const auto is_ocean = [&](int gx,int y)->bool{
-      if(gx>=x0 && gx<x1) return dem.isNoData(gx-x0,y) || dem(gx-x0,y)==ocean_level;
-      if(gx==x0-1)        return haloL.ocean[y];
-      return haloR.ocean[y];
-    };
-    // Rank-local drain: same rule as drain_full, but reading only own columns + halos.
-    const auto drain_local = [&](int gx,int y,int &lx,int &ly,bool &to_ocean)->bool{
-      const float focal = elev(gx,y);
-      float best = std::numeric_limits<float>::infinity(); bool found=false; to_ocean=false;
-      for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
-        if(!dx && !dy) continue;
-        const int nx=gx+dx, ny=y+dy;
-        if(nx<0||nx>=W||ny<0||ny>=H) continue;
-        if(is_ocean(nx,ny)){ to_ocean=true; continue; }
-        const float e = elev(nx,ny);
-        if(e >= focal) continue;
-        if(e <= best){ best=e; lx=nx; ly=ny; found=true; }        // <= : higher-index tie wins
-      }
-      return found;
-    };
+    // Halo-aware accessors (now on ctx); local lambdas delegate so the body below reads unchanged.
+    const auto elev       = [&](int gx,int y){ return ctx.elev(gx,y); };
+    const auto is_ocean   = [&](int gx,int y){ return ctx.is_ocean(gx,y); };
+    const auto drain_local= [&](int gx,int y,int &lx,int &ly,bool &to_ocean){ return ctx.drain_local(gx,y,lx,ly,to_ocean); };
 
     std::vector<int> seam_cols;
     if(r>0)        seam_cols.push_back(x0);
@@ -428,15 +466,14 @@ int main(int argc, char **argv){
         if(drain_local(gc,y,lx,ly,to_ocean) && !to_ocean && tile_of(lx)!=r){ label(lc,y)=BOUNDARY; nb++; }
       }
 
-    rd::Array2D<int8_t> fd(dem.width(), dem.height(), rd::NO_FLOW);
-    dh::DepressionHierarchy<float> deps; std::vector<dh::Outlet<float>> outlets;
+    fd = rd::Array2D<int8_t>(dem.width(), dem.height(), rd::NO_FLOW);   // deps/outlets are ctx members (aliased)
     dh::FloodAndAssignDepressions<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
 
     // Namespace remap (eng-doc component 6): gather per-tile depression counts to rank 0,
     // prefix-sum into global offsets, scatter each rank its offset. This is the shim analogue
     // of MPI_Allgather(count) + prefix sum -- O(ntiles) tiny messages, no per-cell data.
     const int mycount = (int)deps.size() - 1;
-    dh_label_t myoffset = 1;
+    myoffset = 1;
     if(r==0){
       std::vector<int> counts(ntiles); counts[0]=mycount;
       for(int t=1;t<ntiles;t++) c::CommRecv(counts[t], t, TAG_COUNT);
@@ -452,7 +489,7 @@ int main(int argc, char **argv){
     }
 
     // Map this rank's local labels into the global namespace (its own slice; no gather).
-    rd::Array2D<dh_label_t> glab(w, H);
+    glab = rd::Array2D<dh_label_t>(w, H);
     for(int y=0;y<H;y++) for(int x=0;x<w;x++) glab(x,y) = gmap(label(x,y), myoffset);
 
     // ---- distributed conduit resolution (eng-doc section 2, v1 gather-and-resolve) ----
@@ -524,7 +561,7 @@ int main(int argc, char **argv){
     }
 
     // Overlay the resolved BOUNDARY labels onto this rank's global-label slice.
-    rd::Array2D<dh_label_t> glab_pc = glab;
+    glab_pc = glab;
     for(const auto &c2 : myresolved) glab_pc(c2.gx-x0, c2.gy) = c2.label;
 
     // ---- FLAT-LABEL RECONCILIATION (flag-gated; ENH-8) ----
@@ -833,7 +870,7 @@ int main(int argc, char **argv){
     };
     const auto gidx=[&](int gx,int y)->int64_t{ return (int64_t)y*W+gx; };
     const auto dir_to=[&](int dx,int dy)->int8_t{ for(int n=1;n<=8;n++) if(rd::d8x[n]==dx && rd::d8y[n]==dy) return (int8_t)n; return rd::NO_FLOW; };
-    rd::Array2D<int8_t> gfix = fd;                               // start from the tile's flood flowdirs
+    gfix = fd;                                                   // start from the tile's flood flowdirs (ctx-aliased)
     for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++){
       const int gx=x0+lx;
       if(fd(lx,y)==rd::NO_FLOW && !dem.isNoData(lx,y) && label(lx,y)!=OCEAN){
