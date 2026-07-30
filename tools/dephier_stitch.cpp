@@ -129,6 +129,49 @@ struct StitchState {
   }
 };
 
+// Stage 1: per-tile pre-label seam-crossing edges BOUNDARY, then FloodAndAssignDepressions.
+// Each tile keeps its OWN flowdirs (tile.fd) -- the flood's drainage map, tile-local. Conduit
+// resolution below follows each tile's own fd (no global flow map), so it is internally consistent
+// with the flood -- including flats, where the flood's deterministic order (radix_heap bucket sort)
+// fixes the direction. Fills st.tiles and st.n_global.
+static void build_tiles(StitchState &st){
+  const auto& full=st.full; const auto& bounds=st.bounds; const int ntiles=st.ntiles;
+  const float ocean_level=st.ocean_level;
+  const auto tile_of=[&](int x){ return st.tile_of(x); };
+  const auto drain=[&](int x,int y,int &lx,int &ly,bool &to_ocean){ return st.drain(x,y,lx,ly,to_ocean); };
+  auto& tiles=st.tiles;
+  tiles.resize(ntiles);
+  dh_label_t next_offset = 1;
+  for(int t=0;t<ntiles;t++){
+    auto &tile = tiles[t];
+    tile.x0    = bounds[t];
+    tile.dem   = extract_cols(full, bounds[t], bounds[t+1]);
+    tile.label = ocean_labels(tile.dem, ocean_level);
+
+    // internal-seam edge columns of this tile
+    std::vector<int> seam_cols;
+    if(t>0)          seam_cols.push_back(bounds[t]);       // left edge
+    if(t<ntiles-1)   seam_cols.push_back(bounds[t+1]-1);   // right edge
+    for(int gc : seam_cols)
+      for(int y=0;y<full.height();y++){
+        const int lc = gc - tile.x0;
+        if(tile.label(lc,y)!=NO_DEP) continue;             // ocean stays ocean
+        int lx,ly; bool to_ocean;
+        // BOUNDARY only if it drains across the seam and NOT to the ocean
+        if(drain(gc,y,lx,ly,to_ocean) && !to_ocean && tile_of(lx)!=t)
+          tile.label(lc,y) = BOUNDARY;
+      }
+
+    tile.fd = rd::Array2D<int8_t>(tile.dem.width(), tile.dem.height(), rd::NO_FLOW);
+    // A tile may be a bowl interior (no base-level seed); permit the pit-only flood. Its open
+    // top depression is closed later across the seam by HandleEdge + ConstructHierarchyAndVolumes (ENH-2).
+    dh::FloodAndAssignDepressions<float,rd::Topology::D8>(tile.dem, tile.label, tile.fd, tile.deps, tile.outlets, /*permit_without_baselevel_seed=*/true);
+    tile.offset = next_offset;
+    next_offset += tile.deps.size() - 1;
+  }
+  st.n_global = next_offset;
+}
+
 int main(int argc, char **argv){
   if(argc!=4 && argc!=5){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
@@ -168,41 +211,7 @@ int main(int argc, char **argv){
   const auto is_ocean = [&](int x,int y){ return st.is_ocean(x,y); };
   const auto drain    = [&](int x,int y,int &lx,int &ly,bool &to_ocean){ return st.drain(x,y,lx,ly,to_ocean); };
 
-  // ---- per-tile: pre-label seam-crossing edges BOUNDARY, then FloodAndAssignDepressions ----
-  // Each tile keeps its OWN flowdirs (tile.fd) -- the flood's drainage map, tile-local.
-  // Conduit resolution below follows each tile's own fd (no global flow map), so it is
-  // internally consistent with the flood -- including flats, where the flood's
-  // deterministic order (radix_heap bucket sort) fixes the direction.
-  tiles.resize(ntiles);
-  dh_label_t next_offset = 1;
-  for(int t=0;t<ntiles;t++){
-    auto &tile = tiles[t];
-    tile.x0    = bounds[t];
-    tile.dem   = extract_cols(full, bounds[t], bounds[t+1]);
-    tile.label = ocean_labels(tile.dem, ocean_level);
-
-    // internal-seam edge columns of this tile
-    std::vector<int> seam_cols;
-    if(t>0)          seam_cols.push_back(bounds[t]);       // left edge
-    if(t<ntiles-1)   seam_cols.push_back(bounds[t+1]-1);   // right edge
-    for(int gc : seam_cols)
-      for(int y=0;y<full.height();y++){
-        const int lc = gc - tile.x0;
-        if(tile.label(lc,y)!=NO_DEP) continue;             // ocean stays ocean
-        int lx,ly; bool to_ocean;
-        // BOUNDARY only if it drains across the seam and NOT to the ocean
-        if(drain(gc,y,lx,ly,to_ocean) && !to_ocean && tile_of(lx)!=t)
-          tile.label(lc,y) = BOUNDARY;
-      }
-
-    tile.fd = rd::Array2D<int8_t>(tile.dem.width(), tile.dem.height(), rd::NO_FLOW);
-    // A tile may be a bowl interior (no base-level seed); permit the pit-only flood. Its open
-    // top depression is closed later across the seam by HandleEdge + ConstructHierarchyAndVolumes (ENH-2).
-    dh::FloodAndAssignDepressions<float,rd::Topology::D8>(tile.dem, tile.label, tile.fd, tile.deps, tile.outlets, /*permit_without_baselevel_seed=*/true);
-    tile.offset = next_offset;
-    next_offset += tile.deps.size() - 1;
-  }
-  n_global = next_offset;
+  build_tiles(st);                              // per-tile flood -> st.tiles, st.n_global
 
   // ---- assemble global depressions + global label grid ----
   G = dh::DepressionHierarchy<float>(n_global);
