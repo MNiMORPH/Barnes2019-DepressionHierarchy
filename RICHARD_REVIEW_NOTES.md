@@ -9,8 +9,9 @@ upstream; it lives on the fork's `master`.
 **PR status (2026-07-30):** Andy has raised these changes with Richard, who is amenable to them going
 upstream — this file is the review note for that PR. Two things to sharpen before opening it: (a) confirm
 which of the serial-output-changing items below (#1 `PhaseCD` tiebreak, #2 `radix_heap` order, #3 `out_cell`
-tie-break) Richard has explicitly OK'd vs. is still reviewing; (b) note the intended perf follow-up on #2
-(the composite radix key, so the flat sort is not a per-bucket cost). Only the `dephier.hpp` /
+tie-break) Richard has explicitly OK'd vs. is still reviewing; (b) the perf follow-up on #2 that was once
+queued (a composite radix key) has been **measured and retracted** — it would likely cost more than it saves;
+the deterministic sort stays as-is (see #2's Perf caveat). Only the `dephier.hpp` /
 `radix_heap.hpp` changes (the two lists below) are candidates for the upstream PR; the distributed harness
 (`dephier_mpi.cpp`, `dephier_stitch.cpp`) is fork-only. Status since the last note: the distributed build is
 complete (ENH-8) and **bit-identical to serial** across the fixture sweep — that bit-identity rests on the
@@ -43,9 +44,19 @@ tree/labels for the affected cases, so they're yours to bless.
    equal-elevation cells pop in a fixed geometric order. Row-major index preserves order between global
    and tile-local indexing within a tile, so a within-tile flat resolves identically serial vs tiled.
    **Effect:** changes serial flat resolution to a deterministic one.
-   **Perf caveat:** this sorts every equal-elevation bucket — a cost on flat-heavy DEMs. The intended
-   optimization is a **composite radix key** (fold the cell index into the key so the radix orders by
-   `(elevation, index)` with no per-bucket sort). Not yet done.
+   **Perf caveat — MEASURED, and the once-"intended" fix is now RETRACTED (2026-07-31).** The per-bucket
+   sort is a real but modest, input-dependent cost: isolated by timing the serial flood with the sort vs.
+   removed (`-O3`, min-of-15, 512² DEMs), it is **~3% on rough terrain, ~14% on realistic flat-heavy (8
+   elevation levels), ~22% on a pathological single flat**. The once-proposed fix — a **composite radix key**
+   `(elevation, index)` so the radix self-orders with no per-bucket sort — **the same measurement argues
+   against**: rough fractal terrain (~210k distinct elevations → ~210k `pull()`s, tiny sorts) is the
+   *slowest* case (59 ms) while the flat DEMs (a handful of levels → a handful of pulls, huge sorts) are
+   *faster* (41–44 ms). A composite key makes every cell a distinct key → ~N pulls for every input →
+   it pushes flat DEMs into that expensive many-pulls regime, i.e. it likely adds more pull overhead than
+   the sort it removes (net loss), on top of being invasive (changes the key type + every `emplace`/
+   `top_key`). If the flat sort ever surfaces in a real profile, the cheaper/safer lever is a **localized
+   O(m) radix/counting sort of the bucket inside `pull()`** (no key-type change, no `dephier.hpp` change),
+   but at ~14% on flat-heavy it is not worth doing pre-emptively. So: keep the deterministic sort as-is.
 
 3. **`PhaseAB` outlet `out_cell` tie-break** (`dephier.hpp`, outlet discovery — the last split-invariance
    piece; 2026-07-29). When two connections between the same depression pair share the lowest `out_elev`,
