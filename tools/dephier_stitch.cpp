@@ -323,6 +323,84 @@ static void fix_flowdirs(StitchState &st){
                            <<") -- valid but possibly not serial-identical in giant-flat interiors\n";
 }
 
+// Stage 5: FLAT-PARTITION REPLAY (called only under DH_FLAT_PARTITION_REPLAY; SPLIT_INVARIANT_FLATS_PLAN
+// ROAD A). The tiled flood labels a divide/flat cell by a SEAM-DEPENDENT wavefront, so a cell can land in
+// the wrong leaf. REPLAY serial's flood-labelling exactly (seeds = every OCEAN cell + every land cell with
+// no strictly-lower neighbour; buckets ASCending, HIGHEST-index-first LIFO within a bucket), map each
+// replay-basin onto G's existing leaf via that leaf's pit cell (min leaf = canonical; seam-split fragments
+// merge), stamp the canonical leaf with the basin's true pit, overwrite gLabel, and compact G. Full-grid
+// here (the flag's reproducibility trade); dephier_mpi does the footprint-bounded per-rank equivalent.
+static void reconcile_flats(StitchState &st){
+  const auto& full=st.full; auto& G=st.G; auto& gLabel=st.gLabel;
+  const auto is_ocean=[&](int x,int y){ return st.is_ocean(x,y); };
+    const int W=full.width(), H=full.height();
+    // 1. Full pit-up replay of the flood's label partition into r (fresh namespace; OCEAN kept as OCEAN).
+    rd::Array2D<dh_label_t> r(W,H,dh::NO_DEP);
+    std::map<float,std::vector<long>> buckets;
+    const auto rpush=[&](int x,int y){ buckets[full(x,y)].push_back(full.xyToI(x,y)); };
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++){
+      if(is_ocean(x,y)){ r(x,y)=OCEAN; rpush(x,y); continue; }
+      const float e=full(x,y); bool has_lower=false;
+      for(int dy=-1;dy<=1&&!has_lower;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=x+dx,ny=y+dy;
+        if(full.inGrid(nx,ny)&&full(nx,ny)<e){ has_lower=true; break; } }
+      if(!has_lower) rpush(x,y);
+    }
+    dh_label_t nextr=1;
+    std::vector<long> rb_pit(1, -1);                          // rb_pit[label] = the cell that BORE that basin
+    while(!buckets.empty()){
+      auto it=buckets.begin(); const float e=it->first;
+      std::vector<long> cur=std::move(it->second); buckets.erase(it);
+      std::sort(cur.begin(),cur.end());                       // ascending index; pop_back = highest first
+      while(!cur.empty()){
+        const long ci=cur.back(); cur.pop_back();
+        int cx,cy; full.iToxy(ci,cx,cy);
+        dh_label_t cl=r(cx,cy);
+        if(cl==dh::NO_DEP){ cl=nextr++; r(cx,cy)=cl; rb_pit.push_back(ci); }   // popped NO_DEP -> new pit (= serial's pit)
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=cx+dx,ny=cy+dy;
+          if(!full.inGrid(nx,ny) || r(nx,ny)!=dh::NO_DEP) continue;
+          r(nx,ny)=cl; if(full(nx,ny)==e) cur.push_back(full.xyToI(nx,ny)); else buckets[full(nx,ny)].push_back(full.xyToI(nx,ny)); }
+      }
+    }
+    // 2. Map each replay-basin to G's EXISTING leaf via that leaf's pit cell (min leaf = canonical; several
+    //    leaves in one replay-basin = a seam-split basin -> they merge into the min).
+    std::vector<dh_label_t> rb2leaf(nextr, dh::NO_VALUE);
+    for(dh_label_t i=1;i<G.size();i++){
+      if(G[i].pit_cell==dh::NO_VALUE) continue;
+      int px,py; full.iToxy(G[i].pit_cell,px,py); const dh_label_t rb=r(px,py);
+      if(rb==OCEAN || rb>=nextr) continue;
+      if(rb2leaf[rb]==dh::NO_VALUE || i<rb2leaf[rb]) rb2leaf[rb]=i;
+    }
+    // Stamp each canonical leaf with the replay's own pit (= serial's pit: the lowest, highest-index cell of
+    // the basin). pit_elev IS in the canonical signature, so a merged leaf must carry the basin's true min,
+    // not the arbitrary min-label fragment's pit (fixes testdem8 sp3: serial pit_elev 2 vs fragment's 4).
+    for(dh_label_t rb=1;rb<nextr;rb++){
+      const dh_label_t L=rb2leaf[rb];
+      if(L==dh::NO_VALUE) continue;
+      G[L].pit_cell=(dh::flat_c_idx)rb_pit[rb]; int px,py; full.iToxy(rb_pit[rb],px,py); G[L].pit_elev=full(px,py);
+    }
+    // 3. Overwrite gLabel with serial's partition (in G's namespace).
+    long relabeled=0, orphan=0;
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++){
+      if(is_ocean(x,y)){ gLabel(x,y)=OCEAN; continue; }
+      const dh_label_t rb=r(x,y);
+      if(rb==OCEAN){ if(gLabel(x,y)!=OCEAN){ gLabel(x,y)=OCEAN; relabeled++; } continue; }
+      const dh_label_t L = (rb<nextr) ? rb2leaf[rb] : dh::NO_VALUE;
+      if(L==dh::NO_VALUE){ orphan++; continue; }               // no G-leaf for this basin: keep existing label
+      if(gLabel(x,y)!=L){ gLabel(x,y)=L; relabeled++; }
+    }
+    // 4. Compact G: keep only leaves still referenced by gLabel (dropped = merged-away / emptied), renumber.
+    std::vector<char> used(G.size(),0); used[0]=1;             // ocean node always kept
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(gLabel(x,y)!=OCEAN) used[gLabel(x,y)]=1;
+    std::vector<dh_label_t> dense(G.size(),0); dh_label_t nn=0;
+    for(dh_label_t i=0;i<G.size();i++) if(used[i]) dense[i]=nn++;
+    dh::DepressionHierarchy<float> G2(nn);
+    for(dh_label_t i=0;i<G.size();i++) if(used[i]){ G2[dense[i]]=G[i]; G2[dense[i]].dep_label=dense[i]; }
+    for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(gLabel(x,y)!=OCEAN) gLabel(x,y)=dense[gLabel(x,y)];
+    const dh_label_t old_leaves=G.size(); G = std::move(G2);
+    std::cerr<<"FLAT-PARTITION-REPLAY: "<<nextr-1<<" replay basins, relabeled "<<relabeled
+             <<" cells, leaves "<<old_leaves<<"->"<<nn<<" orphan_cells="<<orphan<<"\n";
+}
+
 int main(int argc, char **argv){
   if(argc!=4 && argc!=5){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
@@ -410,74 +488,7 @@ int main(int argc, char **argv){
   // reproducibility trade); distributable later via ENH-1 seam-exchange replaying the flood ORDER across the
   // seam. Default OFF => byte-identical.
   const bool flat_replay = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr;
-  if(flat_replay){
-    const int W=full.width(), H=full.height();
-    // 1. Full pit-up replay of the flood's label partition into r (fresh namespace; OCEAN kept as OCEAN).
-    rd::Array2D<dh_label_t> r(W,H,dh::NO_DEP);
-    std::map<float,std::vector<long>> buckets;
-    const auto rpush=[&](int x,int y){ buckets[full(x,y)].push_back(full.xyToI(x,y)); };
-    for(int y=0;y<H;y++) for(int x=0;x<W;x++){
-      if(is_ocean(x,y)){ r(x,y)=OCEAN; rpush(x,y); continue; }
-      const float e=full(x,y); bool has_lower=false;
-      for(int dy=-1;dy<=1&&!has_lower;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=x+dx,ny=y+dy;
-        if(full.inGrid(nx,ny)&&full(nx,ny)<e){ has_lower=true; break; } }
-      if(!has_lower) rpush(x,y);
-    }
-    dh_label_t nextr=1;
-    std::vector<long> rb_pit(1, -1);                          // rb_pit[label] = the cell that BORE that basin
-    while(!buckets.empty()){
-      auto it=buckets.begin(); const float e=it->first;
-      std::vector<long> cur=std::move(it->second); buckets.erase(it);
-      std::sort(cur.begin(),cur.end());                       // ascending index; pop_back = highest first
-      while(!cur.empty()){
-        const long ci=cur.back(); cur.pop_back();
-        int cx,cy; full.iToxy(ci,cx,cy);
-        dh_label_t cl=r(cx,cy);
-        if(cl==dh::NO_DEP){ cl=nextr++; r(cx,cy)=cl; rb_pit.push_back(ci); }   // popped NO_DEP -> new pit (= serial's pit)
-        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; int nx=cx+dx,ny=cy+dy;
-          if(!full.inGrid(nx,ny) || r(nx,ny)!=dh::NO_DEP) continue;
-          r(nx,ny)=cl; if(full(nx,ny)==e) cur.push_back(full.xyToI(nx,ny)); else buckets[full(nx,ny)].push_back(full.xyToI(nx,ny)); }
-      }
-    }
-    // 2. Map each replay-basin to G's EXISTING leaf via that leaf's pit cell (min leaf = canonical; several
-    //    leaves in one replay-basin = a seam-split basin -> they merge into the min).
-    std::vector<dh_label_t> rb2leaf(nextr, dh::NO_VALUE);
-    for(dh_label_t i=1;i<G.size();i++){
-      if(G[i].pit_cell==dh::NO_VALUE) continue;
-      int px,py; full.iToxy(G[i].pit_cell,px,py); const dh_label_t rb=r(px,py);
-      if(rb==OCEAN || rb>=nextr) continue;
-      if(rb2leaf[rb]==dh::NO_VALUE || i<rb2leaf[rb]) rb2leaf[rb]=i;
-    }
-    // Stamp each canonical leaf with the replay's own pit (= serial's pit: the lowest, highest-index cell of
-    // the basin). pit_elev IS in the canonical signature, so a merged leaf must carry the basin's true min,
-    // not the arbitrary min-label fragment's pit (fixes testdem8 sp3: serial pit_elev 2 vs fragment's 4).
-    for(dh_label_t rb=1;rb<nextr;rb++){
-      const dh_label_t L=rb2leaf[rb];
-      if(L==dh::NO_VALUE) continue;
-      G[L].pit_cell=(dh::flat_c_idx)rb_pit[rb]; int px,py; full.iToxy(rb_pit[rb],px,py); G[L].pit_elev=full(px,py);
-    }
-    // 3. Overwrite gLabel with serial's partition (in G's namespace).
-    long relabeled=0, orphan=0;
-    for(int y=0;y<H;y++) for(int x=0;x<W;x++){
-      if(is_ocean(x,y)){ gLabel(x,y)=OCEAN; continue; }
-      const dh_label_t rb=r(x,y);
-      if(rb==OCEAN){ if(gLabel(x,y)!=OCEAN){ gLabel(x,y)=OCEAN; relabeled++; } continue; }
-      const dh_label_t L = (rb<nextr) ? rb2leaf[rb] : dh::NO_VALUE;
-      if(L==dh::NO_VALUE){ orphan++; continue; }               // no G-leaf for this basin: keep existing label
-      if(gLabel(x,y)!=L){ gLabel(x,y)=L; relabeled++; }
-    }
-    // 4. Compact G: keep only leaves still referenced by gLabel (dropped = merged-away / emptied), renumber.
-    std::vector<char> used(G.size(),0); used[0]=1;             // ocean node always kept
-    for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(gLabel(x,y)!=OCEAN) used[gLabel(x,y)]=1;
-    std::vector<dh_label_t> dense(G.size(),0); dh_label_t nn=0;
-    for(dh_label_t i=0;i<G.size();i++) if(used[i]) dense[i]=nn++;
-    dh::DepressionHierarchy<float> G2(nn);
-    for(dh_label_t i=0;i<G.size();i++) if(used[i]){ G2[dense[i]]=G[i]; G2[dense[i]].dep_label=dense[i]; }
-    for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(gLabel(x,y)!=OCEAN) gLabel(x,y)=dense[gLabel(x,y)];
-    const dh_label_t old_leaves=G.size(); G = std::move(G2);
-    std::cerr<<"FLAT-PARTITION-REPLAY: "<<nextr-1<<" replay basins, relabeled "<<relabeled
-             <<" cells, leaves "<<old_leaves<<"->"<<nn<<" orphan_cells="<<orphan<<"\n";
-  }
+  if(flat_replay) reconcile_flats(st);          // reconstruct serial's exact flat partition -> G, gLabel
 
   {
     // Re-derive the outlet set from the resolved label grid via the shared scan (dh_outlets.hpp, ENH-5):
