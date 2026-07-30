@@ -609,6 +609,46 @@ static void build_outlets(RankCtx &ctx, std::map<OutKey,OutVal> &outlet_db_dist)
     }
 }
 
+// Stage 8: gather depression records to rank 0 (eng-doc component 7) and assemble the leaf hierarchy.
+// Each rank ships its leaf depressions with dep_label/pit_cell remapped to global; rank 0 places them
+// into Gdist (under flat_replay, remapped to dense survivor ids with emptied leaves dropped and the
+// survivor stamped with the basin's true pit).
+static void gather_and_assemble(RankCtx &ctx, bool flat_replay, dh_label_t n_global_r0,
+                                dh::DepressionHierarchy<float> &Gdist){
+  const int r=ctx.r, x0=ctx.x0, W=ctx.W, ntiles=ctx.ntiles;
+  auto& dem=ctx.dem; auto& deps=ctx.deps; const dh_label_t myoffset=ctx.myoffset;
+  const auto& full=ctx.full;
+  auto& fl_relabel=ctx.fl_relabel; auto& fl_ndense=ctx.fl_ndense; auto& fl_pitstamp=ctx.fl_pitstamp;
+    std::vector<dh::Depression<float>> myrecs;
+    for(dh_label_t k=1;k<deps.size();k++){
+      auto d = deps[k];
+      d.dep_label = gmap(k, myoffset);
+      if(d.pit_cell != dh::NO_VALUE){
+        int lx,ly; dem.iToxy(d.pit_cell, lx, ly);
+        d.pit_cell = (dh::flat_c_idx)ly*W + (x0+lx);              // tile-local -> global row-major index
+      }
+      myrecs.push_back(d);
+    }
+    if(r==0){
+      Gdist = dh::DepressionHierarchy<float>(flat_replay ? fl_ndense : n_global_r0);
+      Gdist[0] = deps[0]; Gdist[0].dep_label = 0;                 // the shared ocean node
+      // Under flat_replay, remap each leaf's label to its dense survivor id and DROP emptied leaves (a
+      // straddling basin's non-surviving half); the survivor record (pit_cell == the basin's true pit) is kept.
+      const auto place=[&](const std::vector<dh::Depression<float>> &v){ for(const auto &d:v){
+        dh_label_t nl = flat_replay ? fl_relabel[d.dep_label] : d.dep_label;
+        if(nl==dh::NO_VALUE) continue;                            // emptied leaf: dropped
+        auto dd=d; dd.dep_label=nl;
+        if(flat_replay){ auto it=fl_pitstamp.find(d.dep_label);   // stamp survivor with the basin's TRUE pit
+          if(it!=fl_pitstamp.end()){ const int64_t rb=it->second; int px,py; full.iToxy(rb,px,py);
+            dd.pit_cell=(dh::flat_c_idx)rb; dd.pit_elev=full(px,py); } }
+        Gdist[nl]=dd; } };
+      place(myrecs);
+      for(int t=1;t<ntiles;t++){ std::vector<dh::Depression<float>> v; c::CommRecv(v,t,TAG_DEPREC); place(v); }
+    } else {
+      c::CommSend(myrecs, 0, TAG_DEPREC);
+    }
+}
+
 int main(int argc, char **argv){
   commt::CommStartup();                      // process lifecycle (MPI_Init; no-op for the shim). Must
                                              // precede any CommRank/Size. Matched CommShutdown at the ends.
@@ -832,38 +872,7 @@ int main(int argc, char **argv){
 
     build_outlets(ctx, outlet_db_dist);           // intra + seam outlet DBs, merged to rank 0
 
-    // ---- gather depression records to rank 0 (eng-doc component 7) ----
-    // Each rank ships its leaf depressions with dep_label and pit_cell remapped to global.
-    // These O(#local depressions) records are the tree's raw material -- the one inherently
-    // global object (the meta-tree has no per-tile home), centralized on rank 0 for Phase C.
-    std::vector<dh::Depression<float>> myrecs;
-    for(dh_label_t k=1;k<deps.size();k++){
-      auto d = deps[k];
-      d.dep_label = gmap(k, myoffset);
-      if(d.pit_cell != dh::NO_VALUE){
-        int lx,ly; dem.iToxy(d.pit_cell, lx, ly);
-        d.pit_cell = (dh::flat_c_idx)ly*W + (x0+lx);              // tile-local -> global row-major index
-      }
-      myrecs.push_back(d);
-    }
-    if(r==0){
-      Gdist = dh::DepressionHierarchy<float>(flat_replay ? fl_ndense : n_global_r0);
-      Gdist[0] = deps[0]; Gdist[0].dep_label = 0;                 // the shared ocean node
-      // Under flat_replay, remap each leaf's label to its dense survivor id and DROP emptied leaves (a
-      // straddling basin's non-surviving half); the survivor record (pit_cell == the basin's true pit) is kept.
-      const auto place=[&](const std::vector<dh::Depression<float>> &v){ for(const auto &d:v){
-        dh_label_t nl = flat_replay ? fl_relabel[d.dep_label] : d.dep_label;
-        if(nl==dh::NO_VALUE) continue;                            // emptied leaf: dropped
-        auto dd=d; dd.dep_label=nl;
-        if(flat_replay){ auto it=fl_pitstamp.find(d.dep_label);   // stamp survivor with the basin's TRUE pit
-          if(it!=fl_pitstamp.end()){ const int64_t rb=it->second; int px,py; full.iToxy(rb,px,py);
-            dd.pit_cell=(dh::flat_c_idx)rb; dd.pit_elev=full(px,py); } }
-        Gdist[nl]=dd; } };
-      place(myrecs);
-      for(int t=1;t<ntiles;t++){ std::vector<dh::Depression<float>> v; c::CommRecv(v,t,TAG_DEPREC); place(v); }
-    } else {
-      c::CommSend(myrecs, 0, TAG_DEPREC);
-    }
+    gather_and_assemble(ctx, flat_replay, n_global_r0, Gdist);   // ship leaf records -> rank 0's Gdist
 
     // ---- Phase C (rank 0, grid-free assembly) + distributed Phase D (marginal volumes) ----
     // Rank 0 assembles the hierarchy from the gathered records + distributed outlet set, then
