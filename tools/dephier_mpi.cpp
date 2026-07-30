@@ -187,6 +187,8 @@ struct RankCtx {
   dh::DepressionHierarchy<float>  deps;
   std::vector<dh::Outlet<float>>  outlets;
   dh_label_t                      myoffset = 1;
+  int                             nboundary = 0;   // BOUNDARY cells pre-labelled (for verification)
+  std::vector<int>                seam_cols;        // this tile's internal-seam edge columns
   EdgeStrip                       haloL, haloR;
 
   RankCtx(const rd::Array2D<float>& full_, const std::vector<int>& bounds_, int W_, int H_, int ntiles_,
@@ -222,6 +224,38 @@ struct RankCtx {
     return found;
   }
 };
+
+// Stage 1: extract this rank's own columns, label ocean, exchange 1-column seam-edge halos, and
+// pre-label seam cells that drain across (but not to ocean) as BOUNDARY so they seed as provisional
+// exterior in the flood (never spurious pits). Fills ctx.dem/label/haloL/haloR/nboundary.
+static void setup_tile(RankCtx &ctx){
+  const int r=ctx.r, x0=ctx.x0, x1=ctx.x1, w=ctx.w, H=ctx.H, ntiles=ctx.ntiles;
+  ctx.dem   = extract_cols(ctx.full, x0, x1);              // this rank's own columns only
+  ctx.label = ocean_labels(ctx.dem, ctx.ocean_level);
+  // Build this rank's edge strips and exchange with seam neighbours (non-blocking send into the
+  // neighbour's inbox, then blocking recv -- no deadlock).
+  const auto strip_of = [&](int lc){
+    EdgeStrip s; s.elev.resize(H); s.ocean.resize(H); s.nodata.resize(H);
+    for(int y=0;y<H;y++){ s.elev[y]=ctx.dem(lc,y); s.ocean[y]=(ctx.dem.isNoData(lc,y)||ctx.dem(lc,y)==ctx.ocean_level); s.nodata[y]=ctx.dem.isNoData(lc,y); }
+    return s;
+  };
+  if(r+1<ntiles) c::CommSend(strip_of(w-1), r+1, TAG_L2R);  // my right edge -> r+1's left halo
+  if(r-1>=0)     c::CommSend(strip_of(0),   r-1, TAG_R2L);  // my left  edge -> r-1's right halo
+  if(r-1>=0)     c::CommRecv(ctx.haloL, r-1, TAG_L2R);      // column x0-1
+  if(r+1<ntiles) c::CommRecv(ctx.haloR, r+1, TAG_R2L);      // column x1
+
+  ctx.seam_cols.clear();
+  if(r>0)        ctx.seam_cols.push_back(x0);
+  if(r<ntiles-1) ctx.seam_cols.push_back(x1-1);
+  ctx.nboundary = 0;
+  for(int gc : ctx.seam_cols)
+    for(int y=0;y<H;y++){
+      const int lc = gc - x0;
+      if(ctx.label(lc,y)!=NO_DEP) continue;
+      int lx,ly; bool to_ocean;
+      if(ctx.drain_local(gc,y,lx,ly,to_ocean) && !to_ocean && ctx.tile_of(lx)!=r){ ctx.label(lc,y)=BOUNDARY; ctx.nboundary++; }
+    }
+}
 
 int main(int argc, char **argv){
   commt::CommStartup();                      // process lifecycle (MPI_Init; no-op for the shim). Must
@@ -436,37 +470,13 @@ int main(int argc, char **argv){
     auto& glab_pc=ctx.glab_pc; auto& gfix=ctx.gfix; auto& deps=ctx.deps; auto& outlets=ctx.outlets;
     auto& myoffset=ctx.myoffset; auto& haloL=ctx.haloL; auto& haloR=ctx.haloR;
 
-    dem   = extract_cols(full, x0, x1);                          // this rank's own columns only
-    label = ocean_labels(dem, ocean_level);
+    setup_tile(ctx);                              // own columns, ocean labels, halo exchange, BOUNDARY pre-label
 
-    // Build this rank's edge strips and exchange with seam neighbours (non-blocking send
-    // into the neighbour's inbox, then blocking recv -- no deadlock).
-    const auto strip_of = [&](int lc){
-      EdgeStrip s; s.elev.resize(H); s.ocean.resize(H); s.nodata.resize(H);
-      for(int y=0;y<H;y++){ s.elev[y]=dem(lc,y); s.ocean[y]=(dem.isNoData(lc,y)||dem(lc,y)==ocean_level); s.nodata[y]=dem.isNoData(lc,y); }
-      return s;
-    };
-    if(r+1<ntiles) c::CommSend(strip_of(w-1), r+1, TAG_L2R);      // my right edge -> r+1's left halo
-    if(r-1>=0)     c::CommSend(strip_of(0),   r-1, TAG_R2L);      // my left  edge -> r-1's right halo
-    if(r-1>=0)     c::CommRecv(haloL, r-1, TAG_L2R);              // column x0-1
-    if(r+1<ntiles) c::CommRecv(haloR, r+1, TAG_R2L);              // column x1
-
-    // Halo-aware accessors (now on ctx); local lambdas delegate so the body below reads unchanged.
+    // Halo-aware accessors (on ctx); local lambdas delegate so the body below reads unchanged.
     const auto elev       = [&](int gx,int y){ return ctx.elev(gx,y); };
     const auto is_ocean   = [&](int gx,int y){ return ctx.is_ocean(gx,y); };
     const auto drain_local= [&](int gx,int y,int &lx,int &ly,bool &to_ocean){ return ctx.drain_local(gx,y,lx,ly,to_ocean); };
-
-    std::vector<int> seam_cols;
-    if(r>0)        seam_cols.push_back(x0);
-    if(r<ntiles-1) seam_cols.push_back(x1-1);
-    int nb=0;
-    for(int gc : seam_cols)
-      for(int y=0;y<H;y++){
-        const int lc = gc - x0;
-        if(label(lc,y)!=NO_DEP) continue;
-        int lx,ly; bool to_ocean;
-        if(drain_local(gc,y,lx,ly,to_ocean) && !to_ocean && tile_of(lx)!=r){ label(lc,y)=BOUNDARY; nb++; }
-      }
+    (void)is_ocean;                               // (used by later stages; silence unused if a stage is lifted out)
 
     fd = rd::Array2D<int8_t>(dem.width(), dem.height(), rd::NO_FLOW);   // deps/outlets are ctx members (aliased)
     dh::FloodAndAssignDepressions<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
@@ -518,7 +528,7 @@ int main(int argc, char **argv){
     for(int y=0;y<H;y++)                                               // ALL BOUNDARY cells: the label
       for(int gx=x0;gx<x1;gx++)                                        // spreads inward through FloodAndAssignDepressions,
         if(label(gx-x0,y)==BOUNDARY) mylw.push_back(localwalk(gx,y));  // not just the seeded seam cells
-    for(int gc : seam_cols)                                            // edge-column labels (EXIT targets
+    for(int gc : ctx.seam_cols)                                       // edge-column labels (EXIT targets
       for(int y=0;y<H;y++) myedge.push_back({ gc, y, glab(gc-x0,y) }); // land on a neighbour's edge column)
 
     // PHASE 2 (rank 0): gather the O(boundary) records, chase each BOUNDARY cell to its
@@ -911,7 +921,7 @@ int main(int argc, char **argv){
     dist[r].fd    = std::move(fd);
     dist[r].glab  = std::move(glab);
     dist[r].glab_pc = std::move(glab_pc);
-    dist[r].nboundary = nb;
+    dist[r].nboundary = ctx.nboundary;
     dist[r].ndep  = mycount;
     dist[r].offset= myoffset;
     c::CommBarrier();
