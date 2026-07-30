@@ -432,6 +432,22 @@ static void build_outlets(StitchState &st){
     }
 }
 
+// Stage 7: one global ConstructHierarchyAndVolumes, then the §3.2 collapse pass. The collapse is
+// RETIRED under flat_replay: the replay gives serial's exact partition, so outlets ->
+// ConstructHierarchyAndVolumes build serial's tree with no seam artifacts (and the compact already
+// dropped spurious leaves); the collapse's seam-dependent meta-over-halves passes would then DISSOLVE
+// REAL structure (measured: kerry_test9 sp7 merged two genuine basins).
+static void construct_hierarchy(StitchState &st, bool flat_replay){
+  const auto& full=st.full; const auto& bounds=st.bounds;
+  auto& G=st.G; auto& gLabel=st.gLabel; auto& outlets=st.outlets;
+  dh::ConstructHierarchyAndVolumes<float>(G, outlets, full, gLabel);
+  int n_collapsed = 0;
+  if(!flat_replay){
+    n_collapsed = CollapseSeamArtifacts(G, full, bounds);
+    if(n_collapsed) std::cerr<<"collapse: contracted "<<n_collapsed<<" seam artifact(s)\n";
+  }
+}
+
 int main(int argc, char **argv){
   if(argc!=4 && argc!=5){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
@@ -581,19 +597,7 @@ int main(int argc, char **argv){
              <<" out_elev_diff="<<ediff<<" only_serial="<<only_s<<" only_tiled="<<only_t<<"\n";
   }
 
-  // ---- one global ConstructHierarchyAndVolumes ----
-  dh::ConstructHierarchyAndVolumes<float>(G, outlets, full, gLabel);
-
-  // ---- §3.2 collapse pass: contract seam-split artifacts to a serial-identical tree ----
-  // RETIRED when the flat-partition replay is on: the replay gives serial's exact partition, so outlets ->
-  // ConstructHierarchyAndVolumes build serial's tree with no seam artifacts, and the compact already drops spurious leaves. The
-  // collapse's meta-over-halves passes (seam-dependent) would then DISSOLVE REAL structure (measured:
-  // kerry_test9 sp7 merged two genuine basins). This is the retirement the warning has been flagging.
-  int n_collapsed = 0;
-  if(!flat_replay){
-    n_collapsed = CollapseSeamArtifacts(G, full, bounds);
-    if(n_collapsed) std::cerr<<"collapse: contracted "<<n_collapsed<<" seam artifact(s)\n";
-  }
+  construct_hierarchy(st, flat_replay);        // global ConstructHierarchyAndVolumes + (non-replay) collapse
 
   // ---- serial ground truth ----
   auto s_label = ocean_labels(full, ocean_level);
