@@ -547,6 +547,68 @@ static void reconcile_flats(RankCtx &ctx, dh_label_t n_global_r0){
       }
 }
 
+// Stage 7: distributed outlet set (eng-doc component 4). Build this tile's intra-tile outlet DB and
+// its RIGHT-seam edge DB (via the shared dh_outlets scan), then gather to rank 0 and merge all intra
+// then all edge in rank order (matching the stitch's outlet order) into outlet_db_dist.
+static void build_outlets(RankCtx &ctx, std::map<OutKey,OutVal> &outlet_db_dist){
+  const int r=ctx.r, x0=ctx.x0, x1=ctx.x1, W=ctx.W, H=ctx.H, ntiles=ctx.ntiles;
+  auto& dem=ctx.dem; auto& glab_pc=ctx.glab_pc; const auto& bounds=ctx.bounds;
+    c::CommBarrier();                                            // separate the conduit gather from this one
+    // Intra-tile outlet DB via the shared scan (dh_outlets.hpp, ENH-5): adjacencies whose neighbour is in
+    // THIS tile (own columns only). Accessors take GLOBAL (x,y) and map to this tile's local arrays.
+    OutletDB<int64_t> myintra;
+    {
+      const auto label  = [&](int x,int y){ return glab_pc(x-x0,y); };
+      const auto elev   = [&](int x,int y){ return dem(x-x0,y); };
+      const auto cidx   = [&](int x,int y){ return (int64_t)y*W+x; };
+      const auto nodata = [&](int x,int y){ return dem.isNoData(x-x0,y); };
+      OutletScanIntra(myintra, x0, x1, W, H, label, elev, cidx, nodata,
+                        [&](int /*x*/,int nx){ return nx>=x0 && nx<x1; });  // same tile == own columns
+    }
+    // HandleEdge across seams: send my LEFT edge column (resolved) to r-1; each rank runs the
+    // match for its RIGHT seam using the neighbour's LEFT-edge strip. O(H) per seam.
+    if(r>0){
+      ResStrip s; s.label.resize(H); s.elev.resize(H); s.nodata.resize(H);
+      for(int y=0;y<H;y++){ s.label[y]=glab_pc(0,y); s.elev[y]=dem(0,y); s.nodata[y]=dem.isNoData(0,y); }
+      c::CommSend(s, r-1, TAG_RES_LEFT);
+    }
+    OutletDB<int64_t> myedgedb;
+    if(r<ntiles-1){
+      ResStrip nbr; c::CommRecv(nbr, r+1, TAG_RES_LEFT);
+      const int cA=x1-1, cB=bounds[r+1];                        // own right edge / neighbour left edge (x1)
+      // Side A = my own right-edge column (local arrays); side B = the neighbour's exchanged LEFT-edge strip.
+      OutletScanSeam(myedgedb, H,
+        [&](int y){return glab_pc(cA-x0,y);},[&](int y){return dem(cA-x0,y);},[&](int y){return (int64_t)y*W+cA;},[&](int y){return dem.isNoData(cA-x0,y);},
+        [&](int y){return nbr.label[y];},    [&](int y){return nbr.elev[y];}, [&](int y){return (int64_t)y*W+cB;},[&](int y){return (bool)nbr.nodata[y];});
+    }
+    // Gather per-rank DBs to rank 0; merge all intra (rank order), then all edge (rank order),
+    // matching the stitch's "all intra-tile, then all seams" outlet order.
+    const auto to_vec=[&](const std::map<OutKey,OutVal> &db){
+      std::vector<ORec> v; v.reserve(db.size());
+      for(const auto &kv : db) v.push_back({ kv.first.first, kv.first.second, kv.second.first, kv.second.second });
+      return v;
+    };
+    std::vector<ORec> intra_vec=to_vec(myintra.db), edge_vec=to_vec(myedgedb.db);
+    if(r==0){
+      std::vector<std::vector<ORec>> intra_all(ntiles), edge_all(ntiles);
+      intra_all[0]=intra_vec; edge_all[0]=edge_vec;
+      for(int t=1;t<ntiles;t++){ c::CommRecv(intra_all[t],t,TAG_ODB_INTRA); c::CommRecv(edge_all[t],t,TAG_ODB_EDGE); }
+      std::map<OutKey,OutVal> gdb;
+      const auto mrg=[&](const ORec &rc){                       // same tie-break as reduce(): lower cell wins
+        const auto it=gdb.find({rc.depa,rc.depb});
+        if(it==gdb.end() || rc.oelev < it->second.first
+                         || (rc.oelev==it->second.first && rc.ocell < it->second.second))
+          gdb[{rc.depa,rc.depb}]={rc.oelev,rc.ocell};
+      };
+      for(int t=0;t<ntiles;t++) for(const auto &rc:intra_all[t]) mrg(rc);
+      for(int t=0;t<ntiles;t++) for(const auto &rc:edge_all[t]) mrg(rc);
+      outlet_db_dist = std::move(gdb);
+    } else {
+      c::CommSend(intra_vec, 0, TAG_ODB_INTRA);
+      c::CommSend(edge_vec,  0, TAG_ODB_EDGE);
+    }
+}
+
 int main(int argc, char **argv){
   commt::CommStartup();                      // process lifecycle (MPI_Init; no-op for the shim). Must
                                              // precede any CommRank/Size. Matched CommShutdown at the ends.
@@ -768,61 +830,7 @@ int main(int argc, char **argv){
 
     if(flat_replay) reconcile_flats(ctx, n_global_r0);   // ENH-8: reproduce serial's exact flat-label partition
 
-    // ---- distributed outlet set (eng-doc component 4) ----
-    c::CommBarrier();                                            // separate the conduit gather from this one
-    // Intra-tile outlet DB via the shared scan (dh_outlets.hpp, ENH-5): adjacencies whose neighbour is in
-    // THIS tile (own columns only). Accessors take GLOBAL (x,y) and map to this tile's local arrays.
-    OutletDB<int64_t> myintra;
-    {
-      const auto label  = [&](int x,int y){ return glab_pc(x-x0,y); };
-      const auto elev   = [&](int x,int y){ return dem(x-x0,y); };
-      const auto cidx   = [&](int x,int y){ return (int64_t)y*W+x; };
-      const auto nodata = [&](int x,int y){ return dem.isNoData(x-x0,y); };
-      OutletScanIntra(myintra, x0, x1, W, H, label, elev, cidx, nodata,
-                        [&](int /*x*/,int nx){ return nx>=x0 && nx<x1; });  // same tile == own columns
-    }
-    // HandleEdge across seams: send my LEFT edge column (resolved) to r-1; each rank runs the
-    // match for its RIGHT seam using the neighbour's LEFT-edge strip. O(H) per seam.
-    if(r>0){
-      ResStrip s; s.label.resize(H); s.elev.resize(H); s.nodata.resize(H);
-      for(int y=0;y<H;y++){ s.label[y]=glab_pc(0,y); s.elev[y]=dem(0,y); s.nodata[y]=dem.isNoData(0,y); }
-      c::CommSend(s, r-1, TAG_RES_LEFT);
-    }
-    OutletDB<int64_t> myedgedb;
-    if(r<ntiles-1){
-      ResStrip nbr; c::CommRecv(nbr, r+1, TAG_RES_LEFT);
-      const int cA=x1-1, cB=bounds[r+1];                        // own right edge / neighbour left edge (x1)
-      // Side A = my own right-edge column (local arrays); side B = the neighbour's exchanged LEFT-edge strip.
-      OutletScanSeam(myedgedb, H,
-        [&](int y){return glab_pc(cA-x0,y);},[&](int y){return dem(cA-x0,y);},[&](int y){return (int64_t)y*W+cA;},[&](int y){return dem.isNoData(cA-x0,y);},
-        [&](int y){return nbr.label[y];},    [&](int y){return nbr.elev[y];}, [&](int y){return (int64_t)y*W+cB;},[&](int y){return (bool)nbr.nodata[y];});
-    }
-    // Gather per-rank DBs to rank 0; merge all intra (rank order), then all edge (rank order),
-    // matching the stitch's "all intra-tile, then all seams" outlet order.
-    const auto to_vec=[&](const std::map<OutKey,OutVal> &db){
-      std::vector<ORec> v; v.reserve(db.size());
-      for(const auto &kv : db) v.push_back({ kv.first.first, kv.first.second, kv.second.first, kv.second.second });
-      return v;
-    };
-    std::vector<ORec> intra_vec=to_vec(myintra.db), edge_vec=to_vec(myedgedb.db);
-    if(r==0){
-      std::vector<std::vector<ORec>> intra_all(ntiles), edge_all(ntiles);
-      intra_all[0]=intra_vec; edge_all[0]=edge_vec;
-      for(int t=1;t<ntiles;t++){ c::CommRecv(intra_all[t],t,TAG_ODB_INTRA); c::CommRecv(edge_all[t],t,TAG_ODB_EDGE); }
-      std::map<OutKey,OutVal> gdb;
-      const auto mrg=[&](const ORec &rc){                       // same tie-break as reduce(): lower cell wins
-        const auto it=gdb.find({rc.depa,rc.depb});
-        if(it==gdb.end() || rc.oelev < it->second.first
-                         || (rc.oelev==it->second.first && rc.ocell < it->second.second))
-          gdb[{rc.depa,rc.depb}]={rc.oelev,rc.ocell};
-      };
-      for(int t=0;t<ntiles;t++) for(const auto &rc:intra_all[t]) mrg(rc);
-      for(int t=0;t<ntiles;t++) for(const auto &rc:edge_all[t]) mrg(rc);
-      outlet_db_dist = std::move(gdb);
-    } else {
-      c::CommSend(intra_vec, 0, TAG_ODB_INTRA);
-      c::CommSend(edge_vec,  0, TAG_ODB_EDGE);
-    }
+    build_outlets(ctx, outlet_db_dist);           // intra + seam outlet DBs, merged to rank 0
 
     // ---- gather depression records to rank 0 (eng-doc component 7) ----
     // Each rank ships its leaf depressions with dep_label and pit_cell remapped to global.
