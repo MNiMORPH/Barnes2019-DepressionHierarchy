@@ -54,6 +54,11 @@ if(USE_GDAL AND GDAL_FOUND)
   add_executable(dephier_mpi.exe tools/dephier_mpi.cpp)
   target_include_directories(dephier_mpi.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(dephier_mpi.exe PRIVATE dephier richdem Threads::Threads)
+  # Disable richdem's ProgressBar in the thread shim: it writes the shared std::cerr (format flags via
+  # std::fixed) from every rank thread, which is a real data race on a global stream (harmless in effect
+  # -- garbled progress output -- but a genuine race, and the source of the interleaved stderr). No
+  # progress -> no race, and clean output. (Real MPI is one process per rank, so it doesn't need this.)
+  target_compile_definitions(dephier_mpi.exe PRIVATE RICHDEM_NO_PROGRESS)
 
   # Same harness compiled against the real-MPI comm backend (one rank per process; run with
   # `mpirun -np <ntiles>`). Validates the tree on rank 0. Only built when MPI is available.
