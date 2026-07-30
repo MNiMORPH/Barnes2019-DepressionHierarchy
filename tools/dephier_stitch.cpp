@@ -431,7 +431,7 @@ int main(int argc, char **argv){
   {
     // Re-derive the outlet set from the resolved label grid via the shared scan (dh_outlets.hpp, ENH-5):
     // intra-tile D8 adjacencies, then Barnes' HandleEdge across each internal seam. The reduce keeps the
-    // pair's lowest out_elev (tie -> lower out_cell), and outlet_skip drops a cell only if NoData-and-not-
+    // pair's lowest out_elev (tie -> lower out_cell), and OutletSkip drops a cell only if NoData-and-not-
     // OCEAN -- the two rules that must match the mpi oracle/distributed scans (and once did not).
     const int W = full.width(), H = full.height();
     OutletDB<dh::flat_c_idx> odb;
@@ -439,11 +439,11 @@ int main(int argc, char **argv){
     const auto elev   = [&](int x,int y){ return full(x,y); };
     const auto cidx   = [&](int x,int y){ return full.xyToI(x,y); };
     const auto nodata = [&](int x,int y){ return full.isNoData(x,y); };
-    outlet_scan_intra(odb, 0, W, W, H, label, elev, cidx, nodata,
+    OutletScanIntra(odb, 0, W, W, H, label, elev, cidx, nodata,
                       [&](int x,int nx){ return tile_of(x)==tile_of(nx); });
     for(size_t b=1;b+1<bounds.size();b++){
       const int cA=bounds[b]-1, cB=bounds[b];     // the two columns straddling the seam
-      outlet_scan_seam(odb, H,
+      OutletScanSeam(odb, H,
         [&](int y){return gLabel(cA,y);},[&](int y){return full(cA,y);},[&](int y){return full.xyToI(cA,y);},[&](int y){return full.isNoData(cA,y);},
         [&](int y){return gLabel(cB,y);},[&](int y){return full(cB,y);},[&](int y){return full.xyToI(cB,y);},[&](int y){return full.isNoData(cB,y);});
     }

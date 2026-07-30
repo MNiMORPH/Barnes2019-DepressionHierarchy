@@ -29,7 +29,7 @@
 namespace dh = richdem::dephier;
 
 // The skip rule, defined once: a cell participates in an outlet only if it is not "NoData-and-not-OCEAN".
-inline bool outlet_skip(bool is_nodata, dh::dh_label_t label){ return is_nodata && label!=dh::OCEAN; }
+inline bool OutletSkip(bool is_nodata, dh::dh_label_t label){ return is_nodata && label!=dh::OCEAN; }
 
 // One reduced outlet DB: for each depression pair, the outlet is the HIGHER cell of an adjacency; we keep
 // the pair's LOWEST such out_elev, breaking an elevation tie by the LOWER out_cell. Templated on the cell-
@@ -51,19 +51,19 @@ struct OutletDB {
 };
 
 // Intra-tile D8 scan over columns [xlo,xhi) x rows [0,H) on a WxH grid. `same_tile(x,nx)` gates each
-// neighbour to the focal cell's tile (cross-seam pairs are handled by outlet_scan_seam). All accessors
+// neighbour to the focal cell's tile (cross-seam pairs are handled by OutletScanSeam). All accessors
 // take GLOBAL grid coordinates (x,y); a tile-local caller maps them inside its lambdas.
 template<class CellIdx, class Label,class Elev,class Cidx,class Nodata,class SameTile>
-void outlet_scan_intra(OutletDB<CellIdx>& out, int xlo,int xhi,int W,int H,
+void OutletScanIntra(OutletDB<CellIdx>& out, int xlo,int xhi,int W,int H,
                        Label label, Elev elev, Cidx cidx, Nodata nodata, SameTile same_tile){
   for(int y=0;y<H;y++) for(int x=xlo;x<xhi;x++){
-    if(outlet_skip(nodata(x,y), label(x,y))) continue;
+    if(OutletSkip(nodata(x,y), label(x,y))) continue;
     for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
       if(!dx && !dy) continue;
       const int nx=x+dx, ny=y+dy;
       if(nx<0||nx>=W||ny<0||ny>=H) continue;
       if(!same_tile(x,nx)) continue;                       // neighbour must be in the focal cell's tile
-      if(outlet_skip(nodata(nx,ny), label(nx,ny))) continue;
+      if(OutletSkip(nodata(nx,ny), label(nx,ny))) continue;
       out.reduce(label(x,y),label(nx,ny), elev(x,y),cidx(x,y), elev(nx,ny),cidx(nx,ny));
     }
   }
@@ -74,14 +74,14 @@ void outlet_scan_intra(OutletDB<CellIdx>& out, int xlo,int xhi,int W,int H,
 // nodata BY ROW -- serving both the grid-column pair (stitch, oracle) and own-column-vs-Comm-strip
 // (distributed), whose side B is the neighbour's exchanged left-edge strip.
 template<class CellIdx, class LA,class EA,class CA,class NA, class LB,class EB,class CB,class NB>
-void outlet_scan_seam(OutletDB<CellIdx>& out, int H,
+void OutletScanSeam(OutletDB<CellIdx>& out, int H,
                       LA lblA,EA elvA,CA cidA,NA ndA,
                       LB lblB,EB elvB,CB cidB,NB ndB){
   for(int y=0;y<H;y++){
-    if(outlet_skip(ndA(y), lblA(y))) continue;
+    if(OutletSkip(ndA(y), lblA(y))) continue;
     for(int ny=y-1;ny<=y+1;ny++){
       if(ny<0||ny>=H) continue;
-      if(outlet_skip(ndB(ny), lblB(ny))) continue;
+      if(OutletSkip(ndB(ny), lblB(ny))) continue;
       out.reduce(lblA(y),lblB(ny), elvA(y),cidA(y), elvB(ny),cidB(ny));
     }
   }

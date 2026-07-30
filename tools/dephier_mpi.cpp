@@ -338,11 +338,11 @@ int main(int argc, char **argv){
     const auto elev   = [&](int x,int y){ return full(x,y); };
     const auto cidx   = [&](int x,int y){ return (int64_t)full.xyToI(x,y); };
     const auto nodata = [&](int x,int y){ return full.isNoData(x,y); };
-    outlet_scan_intra(odb, 0, W, W, H, label, elev, cidx, nodata,
+    OutletScanIntra(odb, 0, W, W, H, label, elev, cidx, nodata,
                       [&](int x,int nx){ return tile_of(x)==tile_of(nx); });
     for(size_t b=1;b+1<bounds.size();b++){
       const int cA=bounds[b]-1, cB=bounds[b];
-      outlet_scan_seam(odb, H,
+      OutletScanSeam(odb, H,
         [&](int y){return gLabel_oracle_pc(cA,y);},[&](int y){return full(cA,y);},[&](int y){return (int64_t)full.xyToI(cA,y);},[&](int y){return full.isNoData(cA,y);},
         [&](int y){return gLabel_oracle_pc(cB,y);},[&](int y){return full(cB,y);},[&](int y){return (int64_t)full.xyToI(cB,y);},[&](int y){return full.isNoData(cB,y);});
     }
@@ -694,7 +694,7 @@ int main(int argc, char **argv){
       const auto elev   = [&](int x,int y){ return dem(x-x0,y); };
       const auto cidx   = [&](int x,int y){ return (int64_t)y*W+x; };
       const auto nodata = [&](int x,int y){ return dem.isNoData(x-x0,y); };
-      outlet_scan_intra(myintra, x0, x1, W, H, label, elev, cidx, nodata,
+      OutletScanIntra(myintra, x0, x1, W, H, label, elev, cidx, nodata,
                         [&](int /*x*/,int nx){ return nx>=x0 && nx<x1; });  // same tile == own columns
     }
     // HandleEdge across seams: send my LEFT edge column (resolved) to r-1; each rank runs the
@@ -709,7 +709,7 @@ int main(int argc, char **argv){
       ResStrip nbr; c::CommRecv(nbr, r+1, TAG_RES_LEFT);
       const int cA=x1-1, cB=bounds[r+1];                        // own right edge / neighbour left edge (x1)
       // Side A = my own right-edge column (local arrays); side B = the neighbour's exchanged LEFT-edge strip.
-      outlet_scan_seam(myedgedb, H,
+      OutletScanSeam(myedgedb, H,
         [&](int y){return glab_pc(cA-x0,y);},[&](int y){return dem(cA-x0,y);},[&](int y){return (int64_t)y*W+cA;},[&](int y){return dem.isNoData(cA-x0,y);},
         [&](int y){return nbr.label[y];},    [&](int y){return nbr.elev[y];}, [&](int y){return (int64_t)y*W+cB;},[&](int y){return (bool)nbr.nodata[y];});
     }
