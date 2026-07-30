@@ -155,6 +155,20 @@ struct FlatComm {
   }
 };
 
+// Message tags for the distributed pipeline (file scope so the stage functions can use them).
+enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4,       // strip dirs; count->rank0; offset->rank r
+       TAG_LW=5, TAG_EDGE=6, TAG_RESOLVED=7,                  // conduit: Phase-1 recs / edge labels / results
+       TAG_RES_LEFT=8, TAG_ODB_INTRA=9, TAG_ODB_EDGE=10,      // outlets: resolved edge strip / intra-db / edge-db
+       TAG_DEPREC=11,                                         // depression records -> rank 0
+       TAG_TREE_E=12, TAG_TREE_P=13,                          // Phase D: broadcast tree out_elev / parent
+       TAG_MARG_C=14, TAG_MARG_E=15,                          // Phase D: reduce marginal cell_count / total_elev
+       TAG_DISTSLICE=16,                                      // gather per-cell grid slices to rank 0 (MPI verify)
+       TAG_FLAT_L=17, TAG_FLAT_R=18,                          // ENH-1 per-rank flats: seam field columns (L/R dir)
+       TAG_FLAT_CHG=19, TAG_FLAT_CONT=20,                     // ENH-1 per-rank flats: convergence gather / continue
+       TAG_HALO_L=23, TAG_HALO_R=24,                          // ENH-8: chained halo band (L/R dir; dem+glab+ocean)
+       TAG_HALO_CHG=25, TAG_HALO_CONT=26,                     // ENH-8: convergence all-reduce (2-stable)
+       TAG_REP=27, TAG_FLREL=28 };                            // ENH-8: rb->leaf survivor gather/bcast; used-label + densify map
+
 // Per-rank state + shared environment for the distributed build, so the pipeline reads as a sequence of
 // stage(ctx, ...) calls instead of one ~500-line lambda. The environment refs (full/bounds/dims) are
 // identical on every rank; the arrays/objects are this rank's own, produced as the stages run. The
@@ -402,18 +416,6 @@ int main(int argc, char **argv){
   }
 
   // ---- DISTRIBUTED: one thread-rank per tile, BOUNDARY from a 1-column halo ----
-  enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4,     // strip dirs; count->rank0; offset->rank r
-         TAG_LW=5, TAG_EDGE=6, TAG_RESOLVED=7,                // conduit: Phase-1 recs / edge labels / results
-         TAG_RES_LEFT=8, TAG_ODB_INTRA=9, TAG_ODB_EDGE=10,    // outlets: resolved edge strip / intra-db / edge-db
-         TAG_DEPREC=11,                                       // depression records -> rank 0
-         TAG_TREE_E=12, TAG_TREE_P=13,                        // Phase D: broadcast tree out_elev / parent
-         TAG_MARG_C=14, TAG_MARG_E=15,                        // Phase D: reduce marginal cell_count / total_elev
-         TAG_DISTSLICE=16,                                    // gather per-cell grid slices to rank 0 (MPI verify)
-         TAG_FLAT_L=17, TAG_FLAT_R=18,                        // ENH-1 per-rank flats: seam field columns (L/R dir)
-         TAG_FLAT_CHG=19, TAG_FLAT_CONT=20,                   // ENH-1 per-rank flats: convergence gather / continue
-         TAG_HALO_L=23, TAG_HALO_R=24,                        // ENH-8: chained halo band (L/R dir; dem+glab+ocean)
-         TAG_HALO_CHG=25, TAG_HALO_CONT=26,                   // ENH-8: convergence all-reduce (2-stable)
-         TAG_REP=27, TAG_FLREL=28 };                          // ENH-8: rb->leaf survivor gather/bcast; used-label + densify map
   std::map<OutKey,OutVal>         outlet_db_dist;             // rank 0's merged outlet DB (read in verify)
   dh::DepressionHierarchy<float>  Gdist;                      // rank 0's assembled global hierarchy (leaves)
   dh_label_t                      n_global_r0 = 0;            // rank 0's global depression count (incl. ocean)
