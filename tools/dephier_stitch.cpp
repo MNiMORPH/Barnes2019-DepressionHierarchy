@@ -253,59 +253,16 @@ static void assemble_globals(StitchState &st){
         gLabel(tile.x0 + x, y) = tile.g(tile.label(x, y));
 }
 
-int main(int argc, char **argv){
-  if(argc!=4 && argc!=5){
-    std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
-    return -1;
-  }
-  const std::string in_name     = argv[1];
-  const float       ocean_level = std::stod(argv[2]);
-  const int         halo_cap    = (argc==5) ? std::stoi(argv[4]) : std::numeric_limits<int>::max();
-
-  rd::Array2D<float> full(in_name);
-
-  std::vector<int> bounds = {0};
-  {
-    std::string s = argv[3];
-    size_t p = 0;
-    while(true){
-      size_t q = s.find(',', p);
-      bounds.push_back(std::stoi(s.substr(p, q-p)));
-      if(q==std::string::npos) break;
-      p = q+1;
-    }
-  }
-  bounds.push_back(full.width());
-  const int ntiles = bounds.size() - 1;
-
-  StitchState st(full, bounds, ocean_level, halo_cap);
-  // Transitional aliases: the build blocks below still read/write these as locals while each is
-  // lifted into a stage function on `st`; the verification section keeps using them afterwards.
-  auto& tiles    = st.tiles;
-  auto& n_global = st.n_global;
-  auto& G        = st.G;
-  auto& gLabel   = st.gLabel;
-  auto& gFix     = st.gFix;
-  auto& outlets  = st.outlets;
-  // Helpers delegate to st so there is one definition (the stage functions call st.* directly).
-  const auto tile_of  = [&](int x){ return st.tile_of(x); };
-  const auto is_ocean = [&](int x,int y){ return st.is_ocean(x,y); };
-  const auto drain    = [&](int x,int y,int &lx,int &ly,bool &to_ocean){ return st.drain(x,y,lx,ly,to_ocean); };
-
-  build_tiles(st);                              // per-tile flood -> st.tiles, st.n_global
-
-  assemble_globals(st);                        // remap tile labels -> global G + gLabel (BOUNDARY unresolved)
-
-  resolve_conduits(st);                        // resolve BOUNDARY cells across seams -> gLabel
-
-  // ---- flowdir fix-up: restore serial-identical per-cell flowdirs at seam crossings ----
-  // A tile flood cannot point a cell across its own boundary, so a cell whose true
-  // drainage crosses the seam is left with a tile-local flowdir (NO_FLOW at a BOUNDARY
-  // seam seed). Every other cell already matches serial (measured: divergence is 100%
-  // seam-confined). The conduit pass already found each seam seed's cross-seam drain
-  // target, so point the seed's flowdir there -- the same steepest-descent, highest-index-
-  // tie direction the serial flood assigns. This is an O(boundary) edit using only the
-  // perimeter strip; here it produces a global field for validation against serial.
+// Stage 4: restore serial-identical per-cell flowdirs at seam crossings, then resolve flats. A tile
+// flood cannot point a cell across its own boundary, so a seam-crossing cell is left NO_FLOW (a land
+// seam seed) or points at the wrong ocean cell. Restore serial's steepest-descent, highest-index-tie
+// choice using only the perimeter strip; then replace the flood's order-dependent flat claim with a
+// footprint-bounded Barnes-2014 resolve_flats (adaptive halo). Produces st.gFix.
+static void fix_flowdirs(StitchState &st){
+  const auto& full=st.full; const auto& bounds=st.bounds; auto& tiles=st.tiles;
+  auto& gFix=st.gFix; const int halo_cap=st.halo_cap;
+  const auto tile_of=[&](int x){ return st.tile_of(x); };
+  const auto is_ocean=[&](int x,int y){ return st.is_ocean(x,y); };
   gFix = rd::Array2D<int8_t>(full.width(), full.height(), rd::NO_FLOW);
   for(auto &tile : tiles)
     for(int y=0;y<tile.dem.height();y++)
@@ -364,6 +321,54 @@ int main(int argc, char **argv){
   const int flat_capped = ResolveFlatFlowdirsAdaptiveHalo(full, bounds, gFix, halo_cap);
   if(flat_capped) std::cerr<<"flat resolution: "<<flat_capped<<" tile(s) hit the halo cap ("<<halo_cap
                            <<") -- valid but possibly not serial-identical in giant-flat interiors\n";
+}
+
+int main(int argc, char **argv){
+  if(argc!=4 && argc!=5){
+    std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
+    return -1;
+  }
+  const std::string in_name     = argv[1];
+  const float       ocean_level = std::stod(argv[2]);
+  const int         halo_cap    = (argc==5) ? std::stoi(argv[4]) : std::numeric_limits<int>::max();
+
+  rd::Array2D<float> full(in_name);
+
+  std::vector<int> bounds = {0};
+  {
+    std::string s = argv[3];
+    size_t p = 0;
+    while(true){
+      size_t q = s.find(',', p);
+      bounds.push_back(std::stoi(s.substr(p, q-p)));
+      if(q==std::string::npos) break;
+      p = q+1;
+    }
+  }
+  bounds.push_back(full.width());
+  const int ntiles = bounds.size() - 1;
+
+  StitchState st(full, bounds, ocean_level, halo_cap);
+  // Transitional aliases: the build blocks below still read/write these as locals while each is
+  // lifted into a stage function on `st`; the verification section keeps using them afterwards.
+  auto& tiles    = st.tiles;
+  auto& n_global = st.n_global;
+  auto& G        = st.G;
+  auto& gLabel   = st.gLabel;
+  auto& gFix     = st.gFix;
+  auto& outlets  = st.outlets;
+  // Helpers delegate to st so there is one definition (the stage functions call st.* directly).
+  const auto tile_of  = [&](int x){ return st.tile_of(x); };
+  const auto is_ocean = [&](int x,int y){ return st.is_ocean(x,y); };
+  const auto drain    = [&](int x,int y,int &lx,int &ly,bool &to_ocean){ return st.drain(x,y,lx,ly,to_ocean); };
+
+  build_tiles(st);                              // per-tile flood -> st.tiles, st.n_global
+
+  assemble_globals(st);                        // remap tile labels -> global G + gLabel (BOUNDARY unresolved)
+
+  resolve_conduits(st);                        // resolve BOUNDARY cells across seams -> gLabel
+
+  fix_flowdirs(st);                            // seam flowdir fix-up + flat resolution -> gFix
 
   // ---- global outlet set, in the distributable shape (Barnes' join): each tile
   // derives its own outlets from its resolved labels (intra-tile adjacencies), and
