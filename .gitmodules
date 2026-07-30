@@ -1,4 +1,8 @@
+# TEMPORARY: the submodule is pinned to a local GDAL-thread-safety fix (commit 4308687) that upstream
+# r-barnes/richdem does not yet have, so the url points at the awickert fork (branch submodule-gdal-pin)
+# where that commit is hosted, otherwise a fresh `git submodule update --init` cannot fetch it. Revert
+# url -> r-barnes/richdem.git and branch -> dev once r-barnes/richdem#100 merges (tracked in issue #5).
 [submodule "submodules/richdem"]
 	path = submodules/richdem
-	url = https://github.com/r-barnes/richdem.git
-	branch = dev
+	url = https://github.com/awickert/richdem.git
+	branch = submodule-gdal-pin
