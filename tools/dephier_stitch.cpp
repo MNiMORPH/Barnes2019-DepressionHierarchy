@@ -154,39 +154,26 @@ int main(int argc, char **argv){
   bounds.push_back(full.width());
   const int ntiles = bounds.size() - 1;
 
-  const auto tile_of = [&](int x){ int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; };
-  const auto is_ocean = [&](int x,int y){ return full.isNoData(x,y) || full(x,y)==ocean_level; };
-  // Lowest strictly-downhill LAND neighbour on the full grid, and whether the cell
-  // touches ocean. An ocean neighbour is the sea (effectively -inf), so a cell
-  // touching ocean drains to the ocean regardless of its land neighbours.
-  //
-  // Ties (equal-lowest neighbours) are broken by HIGHEST cell index, matching the
-  // flood's radix pop order (radix_heap sorts each equal-elevation bucket ascending
-  // and pops from the back, so the higher-index cell pops first and claims the shared
-  // upslope neighbour). This matters at a seam: a divide cell with a tied descent —
-  // one neighbour in each tile — is claimed by the serial flood from its highest-index
-  // neighbour, so drain() must pick the same side or the cross-seam case is mislabelled.
-  const auto drain = [&](int x,int y,int &lx,int &ly,bool &to_ocean)->bool{
-    const float focal = full(x,y);
-    float best = std::numeric_limits<float>::infinity(); bool found=false; to_ocean=false;
-    for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){        // index-ascending order
-      if(!dx && !dy) continue;
-      int nx=x+dx, ny=y+dy;
-      if(!full.inGrid(nx,ny)) continue;
-      if(is_ocean(nx,ny)){ to_ocean=true; continue; }
-      const float e = full(nx,ny);
-      if(e >= focal) continue;                                  // only strictly downhill
-      if(e <= best){ best=e; lx=nx; ly=ny; found=true; }        // <= : later (higher-index) tie wins
-    }
-    return found;
-  };
+  StitchState st(full, bounds, ocean_level, halo_cap);
+  // Transitional aliases: the build blocks below still read/write these as locals while each is
+  // lifted into a stage function on `st`; the verification section keeps using them afterwards.
+  auto& tiles    = st.tiles;
+  auto& n_global = st.n_global;
+  auto& G        = st.G;
+  auto& gLabel   = st.gLabel;
+  auto& gFix     = st.gFix;
+  auto& outlets  = st.outlets;
+  // Helpers delegate to st so there is one definition (the stage functions call st.* directly).
+  const auto tile_of  = [&](int x){ return st.tile_of(x); };
+  const auto is_ocean = [&](int x,int y){ return st.is_ocean(x,y); };
+  const auto drain    = [&](int x,int y,int &lx,int &ly,bool &to_ocean){ return st.drain(x,y,lx,ly,to_ocean); };
 
   // ---- per-tile: pre-label seam-crossing edges BOUNDARY, then FloodAndAssignDepressions ----
   // Each tile keeps its OWN flowdirs (tile.fd) -- the flood's drainage map, tile-local.
   // Conduit resolution below follows each tile's own fd (no global flow map), so it is
   // internally consistent with the flood -- including flats, where the flood's
   // deterministic order (radix_heap bucket sort) fixes the direction.
-  std::vector<Tile<float>> tiles(ntiles);
+  tiles.resize(ntiles);
   dh_label_t next_offset = 1;
   for(int t=0;t<ntiles;t++){
     auto &tile = tiles[t];
@@ -215,10 +202,10 @@ int main(int argc, char **argv){
     tile.offset = next_offset;
     next_offset += tile.deps.size() - 1;
   }
-  const dh_label_t n_global = next_offset;
+  n_global = next_offset;
 
   // ---- assemble global depressions + global label grid ----
-  dh::DepressionHierarchy<float> G(n_global);
+  G = dh::DepressionHierarchy<float>(n_global);
   G[0] = tiles[0].deps[0];
   G[0].dep_label = 0;
   for(auto &tile : tiles)
@@ -231,7 +218,7 @@ int main(int argc, char **argv){
       }
       G[tile.g(k)] = d;
     }
-  rd::Array2D<dh_label_t> gLabel(full.width(), full.height(), OCEAN);
+  gLabel = rd::Array2D<dh_label_t>(full.width(), full.height(), OCEAN);
   for(auto &tile : tiles)
     for(int y=0;y<tile.dem.height();y++)
       for(int x=0;x<tile.dem.width();x++)
@@ -307,7 +294,7 @@ int main(int argc, char **argv){
   // target, so point the seed's flowdir there -- the same steepest-descent, highest-index-
   // tie direction the serial flood assigns. This is an O(boundary) edit using only the
   // perimeter strip; here it produces a global field for validation against serial.
-  rd::Array2D<int8_t> gFix(full.width(), full.height(), rd::NO_FLOW);
+  gFix = rd::Array2D<int8_t>(full.width(), full.height(), rd::NO_FLOW);
   for(auto &tile : tiles)
     for(int y=0;y<tile.dem.height();y++)
       for(int x=0;x<tile.dem.width();x++)
@@ -475,7 +462,6 @@ int main(int argc, char **argv){
              <<" cells, leaves "<<old_leaves<<"->"<<nn<<" orphan_cells="<<orphan<<"\n";
   }
 
-  std::vector<dh::Outlet<float>> outlets;
   {
     // Re-derive the outlet set from the resolved label grid via the shared scan (dh_outlets.hpp, ENH-5):
     // intra-tile D8 adjacencies, then Barnes' HandleEdge across each internal seam. The reduce keeps the
