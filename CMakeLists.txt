@@ -223,6 +223,15 @@ if(USE_GDAL AND GDAL_FOUND)
            COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test10.dem 0 23)
   set_tests_properties(mpi_flat_replay_canonical PROPERTIES
                        ENVIRONMENT "DH_FLAT_PARTITION_REPLAY=1" PASS_REGULAR_EXPRESSION "MPI-TREE-MATCH ")
+  #  - capped validity: an aggressive halo cap makes the replay a windowed APPROXIMATION, so the tree need
+  #    NOT be bit-identical to serial -- it may even change the depression count (the meta-vs-ocean_linked
+  #    tie-break class; here kerry_test10 @ 5 tiles cap=1 is MPI-TREE-DIFFER + MPI-DECOMP-INCORRECT). But
+  #    the ONE invariant the capped mode must never break is validity/volume-correctness: assert
+  #    MPI-VOL-MATCH so the approximate mode can never silently start losing volume. See BENCHMARKS.md.
+  add_test(NAME mpi_flat_replay_capped_valid
+           COMMAND dephier_mpi.exe ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test10.dem 0 2,4,6,8 1)
+  set_tests_properties(mpi_flat_replay_capped_valid PROPERTIES
+                       ENVIRONMENT "DH_FLAT_PARTITION_REPLAY=1" PASS_REGULAR_EXPRESSION "MPI-VOL-MATCH ")
 
   # ROAD A proof/guard: the flat-label PARTITION replay must reproduce serial's cell->leaf partition EXACTLY
   # (proven on 49 DEMs). It is the rule dephier_stitch's DH_FLAT_PARTITION_REPLAY relies on; if the flood/

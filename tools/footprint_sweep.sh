@@ -75,8 +75,9 @@ done
 
 # Sweep C -- how bit-identity (MPI-TREE-MATCH) vs the cap varies with terrain roughness (beta). Generates
 # its own beta-varied fractals, so it needs make_synthetic_dem.py (WTM_DIR); skipped if unavailable.
-# Legend: M = MATCH (bit-identical); D = DIFFER but VOL-MATCH (valid, volume-correct, not serial-identical);
-# ! = DIFFER *and* VOL-DIFFER (a real problem -- should never appear).
+# Legend: M = MATCH (bit-identical to serial); D = DIFFER but VOL-MATCH (valid, volume-correct -- the
+# universal capped-mode invariant; may or may not preserve the depression count); ! = a DIFFER that also
+# LOST VOLUME (VOL-DIFFER -- a real problem; should NEVER appear).
 echo
 echo "## Sweep C -- exactness vs cap across terrain roughness beta, ntiles=8 (M=match, D=differ-but-valid, !=bad)"
 if python3 "$REPO/tools/make_synthetic_dem.py" --help >/dev/null 2>&1; then
@@ -90,9 +91,9 @@ if python3 "$REPO/tools/make_synthetic_dem.py" --help >/dev/null 2>&1; then
         out=$(DH_FLAT_PARTITION_REPLAY=1 "$BIN" "$demb" 0 "$SPEC8" $cap 2>/dev/null || true)
         t=$(grep -oE 'MPI-TREE-(MATCH|DIFFER)' <<<"$out" | head -1)
         v=$(grep -oE 'MPI-VOL-(MATCH|DIFFER)' <<<"$out" | head -1)
-        if   [[ "$t" == *MATCH ]]; then c=M
-        elif [[ "$v" == *MATCH ]]; then c=D
-        else c='!'; fi
+        if   [[ "$t" == *MATCH ]]; then c=M      # bit-identical to serial
+        elif [[ "$v" == *MATCH ]]; then c=D      # differ but volume-correct + valid (may change node count)
+        else c='!'; fi                          # differ AND lost volume -> a real problem
         row+="   $c"
       done
       printf "%-16s %s\n" "$b" "cap: $row"

@@ -47,8 +47,11 @@ own DEM: `tools/footprint_sweep.sh my.dem`).
 
 Whether a *capped* run reproduces serial's tree bit-for-bit (`MPI-TREE-MATCH`) vs. produces a valid but
 different tree (`MPI-TREE-DIFFER`), swept over spectral roughness β (higher β = smoother/larger-scale
-features). `held_cols` is identical to Sweep A (terrain-independent: `owned + 2·cap`), and **every
-`DIFFER` cell below is still `MPI-VOL-MATCH`** — a valid, volume-correct tree, not a wrong one.
+features). `held_cols` is identical to Sweep A (terrain-independent: `owned + 2·cap`). **Every `DIFFER` cell
+below is still `MPI-VOL-MATCH`** — a valid, volume-correct tree, never a wrong or degraded one; that is the
+*universal* capped-mode invariant. The `DIFFER` cells in *this* sweep are further `MPI-DECOMP-CORRECT` (same
+depression count, so the difference is only the fine tie-break signature) — but that stronger property is
+**not** guaranteed in general: a sufficiently aggressive cap can change the node count too (see the takeaway).
 
 | β (256², seed 1) | ∞ | 64 | 32 | 16 | 8 | 4 | 2 |
 |------------------|---|----|----|----|---|---|---|
@@ -69,10 +72,20 @@ Read the β=2.0 row carefully: `cap=8` **DIFFER** but `cap=4` **MATCH** — dete
   is not reliably "more serial-identical": β=2.0 gives the exact serial tree at `cap=4` but a different
   (valid) one at `cap=8`. Different caps resolve different seam-straddling basins, so bit-identity is a
   jagged function of the cap × terrain × tiling. (A single-terrain sweep can look like a clean threshold —
-  Sweep A does — but that is a coincidence of that terrain, not a rule.)
+  Sweep A does — but that is a coincidence of that terrain, not a rule.) **It is not a correctness risk:**
+  every capped result stays `VOL-MATCH` (volume-correct, valid tree), so the non-monotonicity is movement
+  *among valid trees*, never between a correct tree and a broken one. (In this sweep those valid trees are
+  also `DECOMP-CORRECT`, so only the tie-break signature moves; a more aggressive cap can additionally change
+  the node count — still `VOL-MATCH` — landing in the documented meta-vs-`ocean_linked` tie-break class, e.g.
+  kerry_test10 @ 5 tiles cap=1 is `DECOMP-INCORRECT` + `VOL-MATCH`.) The mechanism: the capped replay makes a
+  *windowed* geodesic partition of a seam-straddling flat, and the radix-pop-order tie-break at the window
+  *edge* is discontinuous in where the edge falls; only a window containing the whole straddling basin
+  reproduces serial's exact pop order (which is exactly why the full halo is needed for bit-identity).
 - **The cap is a footprint/validity knob, not a footprint/exactness dial.** For guaranteed bit-identity,
   use *uncapped* (or, if you happen to know it, a cap ≥ the widest seam-straddling basin). A finite cap
-  always yields a **valid, volume-correct** tree (`VOL-MATCH`) with a bounded footprint — but do not expect
-  it to converge monotonically to serial as you raise it.
+  always yields a **valid, volume-correct tree** (`VOL-MATCH`) at a bounded footprint — usually with serial's
+  depression count too, though an aggressive cap can change that — just do not expect its exact signature (or
+  even its node count) to converge monotonically to
+  serial as you raise the cap.
 - Flowdirs are unaffected by the flat-replay cap (`fd_diff=0` throughout — flowdirs come from the separate
   flat-flowdir pass).
