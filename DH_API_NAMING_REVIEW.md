@@ -16,7 +16,15 @@ not recalled.
 > `GetDepressionHierarchyPhaseC` → **`ConstructHierarchy`** (paper D, grid-free primitive);
 > `GetDepressionHierarchyPhaseCD` → **`ConstructHierarchyAndVolumes`** (central-only convenience);
 > `GetDepressionHierarchy` unchanged. Paper letters now live in `dephier.hpp` comments where they apply.
-> Recs 2–5 (tool-helper names, casing, comm symmetry, monolith extraction) not yet started.
+>
+> **Recs 2–4 also DONE 2026-07-30.** Rec 2 — the flat-flowdir family renamed (dropped "option2"; method +
+> distribution now legible): `ResolveFlatFlowdirs` / `ResolveFlatFlowdirsRelaxed[Tiled|PerRank]` (label-free)
+> / `ResolveFlatFlowdirsAdaptiveHalo` / `ResolveFlatFlowdirsWindow`; helpers `FlatAt`/`FlatSeed`/`FlatFinish`
+> (`f5b10f0`). Rec 3 — casing: `OutletSkip`/`OutletScanIntra`/`OutletScanSeam` to match the core's PascalCase
+> (`3658058`); `dh_canonical` test-internal helpers left lowercase. Rec 4 — comm backends symmetrized:
+> `CommStartup`/`CommShutdown` in both, matched no-ops in the shim (`10bf429`); real mpirun tests pass.
+> **Rec 5 (extract the ~500–600-line tool `main`s into named stage functions) NOT started** — bigger
+> structural churn, deferred pending an explicit go.
 
 ## TL;DR
 
