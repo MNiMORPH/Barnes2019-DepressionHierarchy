@@ -81,6 +81,54 @@ struct Tile {
   }
 };
 
+// Whole-grid stitch state: the environment (shared, immutable) plus the built objects threaded
+// through the build stages below. This mirrors dephier_mpi's RankCtx -- there each rank carries one
+// tile's slice; here a single process holds the whole grid, so the "state" is the global tree plus
+// the label/flowdir grids. The build stages read/write these members; main runs them in order and
+// then reads the results (via reference-aliases) for the verification section.
+struct StitchState {
+  const rd::Array2D<float>& full;               // environment (immutable through the build)
+  const std::vector<int>&   bounds;
+  int   ntiles, W, H;
+  float ocean_level;
+  int   halo_cap;
+  std::vector<Tile<float>>       tiles;         // built state, filled as the pipeline runs
+  dh_label_t                     n_global = 1;  // 1 + total depressions across tiles
+  dh::DepressionHierarchy<float> G;             // assembled global hierarchy
+  rd::Array2D<dh_label_t>        gLabel;        // global label grid (resolved, then flat-reconciled)
+  rd::Array2D<int8_t>            gFix;          // seam-fixed per-cell flowdirs
+  std::vector<dh::Outlet<float>> outlets;       // re-derived outlet set fed to ConstructHierarchyAndVolumes
+
+  StitchState(const rd::Array2D<float>& full_, const std::vector<int>& bounds_, float ocean_level_, int halo_cap_)
+    : full(full_), bounds(bounds_), ntiles((int)bounds_.size()-1), W(full_.width()), H(full_.height()),
+      ocean_level(ocean_level_), halo_cap(halo_cap_) {}
+
+  int tile_of(int x) const { int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; }
+  bool is_ocean(int x,int y) const { return full.isNoData(x,y) || full(x,y)==ocean_level; }
+  // Lowest strictly-downhill LAND neighbour on the full grid, and whether the cell touches ocean.
+  // An ocean neighbour is the sea (effectively -inf), so a cell touching ocean drains to the ocean
+  // regardless of its land neighbours. Ties (equal-lowest neighbours) are broken by HIGHEST cell
+  // index, matching the flood's radix pop order (radix_heap sorts each equal-elevation bucket
+  // ascending and pops from the back, so the higher-index cell pops first and claims the shared
+  // upslope neighbour). This matters at a seam: a divide cell with a tied descent -- one neighbour
+  // in each tile -- is claimed by the serial flood from its highest-index neighbour, so drain() must
+  // pick the same side or the cross-seam case is mislabelled.
+  bool drain(int x,int y,int &lx,int &ly,bool &to_ocean) const {
+    const float focal = full(x,y);
+    float best = std::numeric_limits<float>::infinity(); bool found=false; to_ocean=false;
+    for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){        // index-ascending order
+      if(!dx && !dy) continue;
+      int nx=x+dx, ny=y+dy;
+      if(!full.inGrid(nx,ny)) continue;
+      if(is_ocean(nx,ny)){ to_ocean=true; continue; }
+      const float e = full(nx,ny);
+      if(e >= focal) continue;                                  // only strictly downhill
+      if(e <= best){ best=e; lx=nx; ly=ny; found=true; }        // <= : later (higher-index) tie wins
+    }
+    return found;
+  }
+};
+
 int main(int argc, char **argv){
   if(argc!=4 && argc!=5){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
