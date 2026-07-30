@@ -3,7 +3,7 @@
 //
 // A "bowl-interior" tile in a distributed build lies entirely inside a closed basin whose rim is
 // beyond the tile on every side: every one of its cells drains INWARD, so it has no OCEAN and no
-// BOUNDARY (base-level) seed -- only pit seeds. PhaseAB's exterior-cell check then finds
+// BOUNDARY (base-level) seed -- only pit seeds. FloodAndAssignDepressions's exterior-cell check then finds
 // exterior_cells==0. Historically that was an unconditional throw ("No OCEAN or BOUNDARY cells
 // found"); ENH-2 added `permit_without_baselevel_seed` so such a tile can flood from its pits alone
 // (its open top depression is closed later, across the seam). GUARANTEED to occur at 30" scale (any
@@ -26,7 +26,7 @@ namespace rd = richdem;
 namespace dh = richdem::dephier;
 
 // Build a closed bowl: a high rim around a single low interior pit, with NO ocean labels anywhere
-// (every cell NO_DEP). No cell can drain out -> exterior_cells==0 in PhaseAB.
+// (every cell NO_DEP). No cell can drain out -> exterior_cells==0 in FloodAndAssignDepressions.
 static void make_bowl(rd::Array2D<float> &dem, rd::Array2D<dh::dh_label_t> &label){
   const int W=5, H=5;
   dem   = rd::Array2D<float>(W,H,10.0f);          // rim

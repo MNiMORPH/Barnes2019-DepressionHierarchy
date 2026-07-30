@@ -268,8 +268,12 @@ std::ostream& operator<<(std::ostream &out, const DepressionHierarchy<elev_t> &d
 //        flowdirs - A value [0,7] indicated which direction water from the cell
 //                   flows in order to go "downhill". All cells have a flow
 //                   direction (even flats) except for pit cells.
-//Phase A+B of the build: seed the priority-flood, grow the leaf depressions,
-//and discover the lowest outlet between each pair of adjacent depressions.
+//The grid-reading front of the build, in ONE priority-flood pass: seed the flood from
+//ocean cells (paper phase A, §3.1) and pit cells (phase B, §3.2), then grow the leaf
+//depressions and discover the lowest outlet between each adjacent pair (phase C, §3.3).
+//The paper's A/B/C are three facets of this single pass over shared state (the PQ, the
+//outlet database, label/flowdirs/depressions), not separable stages -- hence one
+//function; the phase letters are marked inline below where each applies.
 //Exposed separately (PARALLEL_DEPHIER_PLAN.md) so a distributed build can run it
 //per tile and reconcile outlets across tiles before the grid-free hierarchy
 //assembly. `depressions` and `outlets` are outputs and must be empty on entry;
@@ -322,6 +326,7 @@ void FloodAndAssignDepressions(
 
   #pragma omp declare reduction(merge : std::vector<flat_c_idx> : omp_out.insert(omp_out.end(), omp_in.begin(), omp_in.end()))
 
+  // ---- Phase A (paper §3.1): ocean identification -- seed the flood from ocean cells ----
   RDLOG_PROGRESS<<"p Adding ocean cells to priority-queue...";
   //We assume the user has already specified a few ocean cells from which to
   //begin looking for depressions. We add all of these ocean cells to the
@@ -378,6 +383,7 @@ void FloodAndAssignDepressions(
 
   RDLOG_PROGRESS<<"p Finding pit cells...";
 
+  // ---- Phase B (paper §3.2): pit-cell identification -- seed the flood from interior minima ----
   //Here we find the pit cells of internally-draining regions. We define these
   //to be cells without any downstream neighbours. Note that this means we will
   //identify all flat cells as being pit cells. For DEMs with many flat cells,
@@ -476,6 +482,8 @@ void FloodAndAssignDepressions(
   //cells are of the same elevation then we visit the one added last (most
   //recently) first.
 
+  // ---- Phase C (paper §3.3): depression assignment -- the priority-flood proper: label cells to
+  //      leaf depressions and record the lowest outlet between each adjacent depression pair ----
   RDLOG_PROGRESS<<"p Searching for outlets...";
 
   progress.start(dem.size());
@@ -582,7 +590,7 @@ void FloodAndAssignDepressions(
           //FIRST (pop order), which depends on traversal order and so is not reproducible across a tiled /
           //distributed build. Preferring the lowest-index out_cell is a purely geometric rule -- a function
           //of the DEM and the partition, independent of how the domain is swept -- so the depression
-          //hierarchy is identical whether built serially or over tiles. (PhaseC then sorts on out_cell, so
+          //hierarchy is identical whether built serially or over tiles. (ConstructHierarchy then sorts on out_cell, so
           //this choice propagates into the tree shape at tied outlets: see the sort comment below.)
           if(outlet.out_elev>out_elev || (outlet.out_elev==out_elev && out_cell<outlet.out_cell)){
             outlet.out_cell = out_cell;             //Update the link with the new (lower) outlet cell
@@ -640,15 +648,17 @@ void FloodAndAssignDepressions(
 
 
 
-//Phase C of the build: assemble the depression hierarchy from the outlets. Fully
-//grid-free -- it reads only `depressions` and `outlets`, never the DEM or labels.
-//In a distributed build this runs once, globally, on the union of all tiles'
-//outlets plus the cross-tile outlets, on a single node (the tree is the one
-//inherently global object). Consumes (sorts) `outlets` and assembles the tree in
-//`depressions` in place; both are the outputs of FloodAndAssignDepressions.
-//Volumes are a separate step (Phase D: CalculateMarginalVolumes then
-//CalculateTotalVolumes), split out so the grid-reading marginal pass can be
-//distributed while this assembly stays central. See ConstructHierarchyAndVolumes.
+//Hierarchy construction (paper phase D, §3.4): sort the outlets by elevation and sweep
+//low->high, union-find merging leaf depressions into meta-depressions. Fully grid-free
+//-- it reads only `depressions` and `outlets`, never the DEM or labels. In a distributed
+//build this runs once, globally, on the union of all tiles' outlets plus the cross-tile
+//outlets, on a single node (the tree is the one inherently global object). Consumes
+//(sorts) `outlets` and assembles the tree in `depressions` in place; both are the outputs
+//of FloodAndAssignDepressions. Volumes are a separate step (paper §6.4 depression
+//statistics: CalculateMarginalVolumes then CalculateTotalVolumes), split out so the
+//grid-reading marginal pass can be distributed while this assembly stays central. This
+//function is the primitive both the central and distributed paths share; the central
+//path bundles it with volumes as ConstructHierarchyAndVolumes.
 template<class elev_t>
 void ConstructHierarchy(
   DepressionHierarchy<elev_t> &depressions,
@@ -815,12 +825,13 @@ void ConstructHierarchy(
 
 
 
-//Phase C+D of the build: assemble the hierarchy (Phase C) then compute volumes
-//(Phase D). Behaviour is identical to the pre-split fused implementation -- this is
-//the serial/centralized convenience wrapper. A distributed build instead calls
-//ConstructHierarchy once on rank 0, distributes CalculateMarginalVolumes
-//across tiles (each rank over its own cells, the per-depression partials reduced),
-//then runs the grid-free CalculateTotalVolumes.
+//Centralized convenience over the shared ConstructHierarchy primitive: construct the
+//hierarchy (paper D) then compute volumes (paper §6.4: CalculateMarginalVolumes then
+//CalculateTotalVolumes) on the whole grid. Behaviour is identical to the pre-split fused
+//implementation. This is the CENTRAL path only -- a distributed build instead calls
+//ConstructHierarchy once on rank 0, then distributes the marginal-volume walk across
+//tiles (each rank over its own cells, the per-depression partials reduced) and runs the
+//grid-free CalculateTotalVolumes centrally; it never calls this wrapper.
 template<class elev_t>
 void ConstructHierarchyAndVolumes(
   DepressionHierarchy<elev_t> &depressions,
@@ -842,9 +853,10 @@ void ConstructHierarchyAndVolumes(
 
 
 
-//Serial convenience wrapper preserving the original public interface: run the
-//flood + outlet discovery (Phase A/B) then the hierarchy assembly + volumes
-//(Phase C/D). Behaviour is identical to the pre-split implementation.
+//Serial convenience wrapper preserving the original public interface: run the flood +
+//outlet discovery (FloodAndAssignDepressions, paper A-C) then the hierarchy assembly +
+//volumes (ConstructHierarchyAndVolumes, paper D + §6.4). Behaviour is identical to the
+//pre-split implementation.
 template<class elev_t, Topology topo>
 DepressionHierarchy<elev_t> GetDepressionHierarchy(
   const Array2D<elev_t> &dem,

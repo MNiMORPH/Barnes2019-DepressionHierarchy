@@ -4,12 +4,12 @@
 //
 //   per tile:  extract sub-DEM -> label ocean; pre-label seam-edge cells whose
 //              steepest descent CROSSES the seam as BOUNDARY (so they seed as
-//              provisional exterior and never become spurious pits) -> PhaseAB
+//              provisional exterior and never become spurious pits) -> FloodAndAssignDepressions
 //   global:    remap tiles into one namespace (shared ocean, offset the rest);
 //              resolve every BOUNDARY cell to the real depression it drains into via a
 //              boundary-graph pass (per-tile-local walk + cross-tile chaining, below);
 //              build the outlet set as per-tile intra-tile outlets + Barnes' HandleEdge
-//              across the seam perimeters; run one global PhaseCD.
+//              across the seam perimeters; run one global ConstructHierarchyAndVolumes.
 //   verify:    canonical signature must equal the serial build's.
 //
 // Both the outlet step and the conduit resolution are in the distributable shape: each
@@ -17,7 +17,7 @@
 // (Barnes' HandleEdge; drain() at seam seeds). In this in-process harness that is
 // organizationally equivalent to a single global pass, but no step reads another tile's
 // interior -- so the per-rank footprint is O(N/P) + O(boundary). The one part still
-// centralized is the final PhaseCD (grid-free, O(#depressions)); a fully-distributed
+// centralized is the final ConstructHierarchyAndVolumes (grid-free, O(#depressions)); a fully-distributed
 // 2016-style join is future work (PARALLEL_DEPHIER_PLAN.md §10).
 
 #include "dh_canonical.hpp"
@@ -133,7 +133,7 @@ int main(int argc, char **argv){
     return found;
   };
 
-  // ---- per-tile: pre-label seam-crossing edges BOUNDARY, then PhaseAB ----
+  // ---- per-tile: pre-label seam-crossing edges BOUNDARY, then FloodAndAssignDepressions ----
   // Each tile keeps its OWN flowdirs (tile.fd) -- the flood's drainage map, tile-local.
   // Conduit resolution below follows each tile's own fd (no global flow map), so it is
   // internally consistent with the flood -- including flats, where the flood's
@@ -162,7 +162,7 @@ int main(int argc, char **argv){
 
     tile.fd = rd::Array2D<int8_t>(tile.dem.width(), tile.dem.height(), rd::NO_FLOW);
     // A tile may be a bowl interior (no base-level seed); permit the pit-only flood. Its open
-    // top depression is closed later across the seam by HandleEdge + PhaseCD (ENH-2).
+    // top depression is closed later across the seam by HandleEdge + ConstructHierarchyAndVolumes (ENH-2).
     dh::FloodAndAssignDepressions<float,rd::Topology::D8>(tile.dem, tile.label, tile.fd, tile.deps, tile.outlets, /*permit_without_baselevel_seed=*/true);
     tile.offset = next_offset;
     next_offset += tile.deps.size() - 1;
@@ -196,7 +196,7 @@ int main(int argc, char **argv){
   //     to a tile-local terminal (a depression/ocean -> its global label) or a seam exit
   //     (the cross-seam cell it hands off to). Touches only tiles[t].label / tiles[t].fd
   //     and the 1-cell cross-seam neighbour via drain() -- the perimeter strip a rank
-  //     already exchanges. A tile's own fd never points across a seam (PhaseAB sees only
+  //     already exchanges. A tile's own fd never points across a seam (FloodAndAssignDepressions sees only
   //     in-tile neighbours), so the walk stays in-tile until it terminates or hits a
   //     NO_FLOW seam seed, where it crosses.
   //   Phase 2 (CHAIN): follow those exits across tiles until a terminal. Conduit paths
@@ -325,9 +325,9 @@ int main(int argc, char **argv){
   // rule. Intra-tile + cross-seam together cover every adjacency, so the result is
   // identical to a single global pass. ----
   //
-  // WHY re-derive here instead of reusing PhaseAB's per-tile `tile.outlets` (this is NOT fluffy
+  // WHY re-derive here instead of reusing FloodAndAssignDepressions's per-tile `tile.outlets` (this is NOT fluffy
   // duplication -- it is load-bearing for the distributed build):
-  //   * PhaseAB found its outlets in each tile's PRE-conduit labels (BOUNDARY sentinels included).
+  //   * FloodAndAssignDepressions found its outlets in each tile's PRE-conduit labels (BOUNDARY sentinels included).
   //     The conduit pass then resolves every BOUNDARY cell to its true drain target, which changes
   //     *which* depressions actually meet. Re-deriving from the RESOLVED labels captures that for
   //     free; remapping `tile.outlets` through the resolution would be fiddly and error-prone.
@@ -335,11 +335,11 @@ int main(int argc, char **argv){
   //     does the same from glab_pc) -- no raw outlet set is shipped or merged. That locality is the
   //     whole point; `tile.outlets` is deliberately dropped.
   // THE COST (record it, so the risk is visible): this is a SECOND outlet-discovery path, and it must
-  // reproduce PhaseAB's semantics faithfully or the two drift. One drift was a real bug: a NoData cell
+  // reproduce FloodAndAssignDepressions's semantics faithfully or the two drift. One drift was a real bug: a NoData cell
   // is OCEAN (ocean_labels), so a basin->NoData-ocean adjacency is a genuine outlet; the scan used to
   // `continue` on all NoData cells and drop it, leaving the basin unclosed (inf volume). The `skip()`
   // below closes that gap (skip a cell only if NoData AND not OCEAN). A debug flag audits for further
-  // drift by diffing this set against PhaseAB's tile.outlets -- see DH_AUDIT_OUTLETS below.
+  // drift by diffing this set against FloodAndAssignDepressions's tile.outlets -- see DH_AUDIT_OUTLETS below.
   // ---- FLAT-PARTITION REPLAY: reconstruct serial's exact cell->leaf partition (flag-gated; ROAD A) ----
   // SPLIT_INVARIANT_FLATS_PLAN.md ROAD A. The tiled flood labels a divide/flat cell by a SEAM-DEPENDENT
   // wavefront, so a cell can land in the wrong leaf -> wrong cell_count/dep_vol (the cell-assignment DIFFER
@@ -354,7 +354,7 @@ int main(int argc, char **argv){
   // starts a new pit; ocean at its dem elevation, propagating OCEAN. Then map each replay-basin onto G's
   // EXISTING leaf via that leaf's pit cell (the min leaf when a seam split one basin into several -> they
   // merge) and overwrite gLabel; compact G. Structure follows: outlets are re-derived
-  // from this corrected gLabel, so PhaseCD builds on serial's partition. Full-grid here (the flag's
+  // from this corrected gLabel, so ConstructHierarchyAndVolumes builds on serial's partition. Full-grid here (the flag's
   // reproducibility trade); distributable later via ENH-1 seam-exchange replaying the flood ORDER across the
   // seam. Default OFF => byte-identical.
   const bool flat_replay = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr;
@@ -456,10 +456,10 @@ int main(int argc, char **argv){
     }
   }
 
-  // ---- DEBUG: audit the re-derived global outlet set against PhaseAB's own per-tile outlets ----
+  // ---- DEBUG: audit the re-derived global outlet set against FloodAndAssignDepressions's own per-tile outlets ----
   // Set DH_AUDIT_OUTLETS=1 to diff the two outlet-discovery paths in real time. The re-derivation
-  // (above) must reproduce every outlet PhaseAB found, or the two drift (that drift is how the
-  // NoData-ocean inf bug arose). For each tile we remap PhaseAB's tile.outlets to global labels via
+  // (above) must reproduce every outlet FloodAndAssignDepressions found, or the two drift (that drift is how the
+  // NoData-ocean inf bug arose). For each tile we remap FloodAndAssignDepressions's tile.outlets to global labels via
   // tile.g and check the pair appears in the re-derived set with the same outlet elevation. Pairs
   // touching BOUNDARY are skipped -- their endpoints are only meaningful AFTER conduit resolution,
   // which is exactly what the re-derivation applies, so a raw comparison there is not apples-to-apples.
@@ -473,18 +473,18 @@ int main(int argc, char **argv){
         if(a==BOUNDARY || b==BOUNDARY || a==b) continue;         // BOUNDARY: needs resolution to compare
         const auto it = grid.find(std::minmax(a,b));
         if(it==grid.end()){ miss++;
-          std::cerr<<"AUDIT miss: PhaseAB outlet {"<<a<<","<<b<<"} elev="<<o.out_elev<<" absent from re-derived set\n"; }
+          std::cerr<<"AUDIT miss: FloodAndAssignDepressions outlet {"<<a<<","<<b<<"} elev="<<o.out_elev<<" absent from re-derived set\n"; }
         else if(it->second!=o.out_elev){ ediff++;
-          std::cerr<<"AUDIT elev: pair {"<<a<<","<<b<<"} PhaseAB="<<o.out_elev<<" re-derived="<<it->second<<"\n"; }
+          std::cerr<<"AUDIT elev: pair {"<<a<<","<<b<<"} FloodAndAssignDepressions="<<o.out_elev<<" re-derived="<<it->second<<"\n"; }
       }
     std::cerr<<"AUDIT-OUTLETS "<<in_name<<" splits="<<argv[3]<<": "<<miss<<" missing pair(s), "
-             <<ediff<<" elevation diff(s) (PhaseAB tile.outlets vs re-derived global)\n";
+             <<ediff<<" elevation diff(s) (FloodAndAssignDepressions tile.outlets vs re-derived global)\n";
   }
 
-  // ---- DEBUG: compare the tiled outlet set fed to PhaseCD against SERIAL's own outlets ----
-  // Set DH_AUDIT_VS_SERIAL=1. PhaseC's outlet sort (dephier.hpp:660) is fully deterministic on the outlet
+  // ---- DEBUG: compare the tiled outlet set fed to ConstructHierarchyAndVolumes against SERIAL's own outlets ----
+  // Set DH_AUDIT_VS_SERIAL=1. ConstructHierarchy's outlet sort (dephier.hpp:660) is fully deterministic on the outlet
   // SET (out_elev -> out_cell -> endpoint pit cells), so if the tiled build feeds the SAME outlets serial
-  // does, it reproduces serial's tree exactly. This audits that: a fresh serial PhaseAB's outlets vs the
+  // does, it reproduces serial's tree exactly. This audits that: a fresh serial FloodAndAssignDepressions's outlets vs the
   // tiled `outlets`, keyed namespace-free by the endpoint depressions' pit cells. A differing out_cell on a
   // shared pair (same out_elev) is a TIE the tiled outlet re-derivation broke differently than serial's
   // flood -- the source of the meta-ordering / meta-vs-ocean_linked residual, and an OUR-SIDE fix (no serial
@@ -514,12 +514,12 @@ int main(int argc, char **argv){
              <<" out_elev_diff="<<ediff<<" only_serial="<<only_s<<" only_tiled="<<only_t<<"\n";
   }
 
-  // ---- one global PhaseCD ----
+  // ---- one global ConstructHierarchyAndVolumes ----
   dh::ConstructHierarchyAndVolumes<float>(G, outlets, full, gLabel);
 
   // ---- §3.2 collapse pass: contract seam-split artifacts to a serial-identical tree ----
   // RETIRED when the flat-partition replay is on: the replay gives serial's exact partition, so outlets ->
-  // PhaseCD build serial's tree with no seam artifacts, and the compact already drops spurious leaves. The
+  // ConstructHierarchyAndVolumes build serial's tree with no seam artifacts, and the compact already drops spurious leaves. The
   // collapse's meta-over-halves passes (seam-dependent) would then DISSOLVE REAL structure (measured:
   // kerry_test9 sp7 merged two genuine basins). This is the retirement the warning has been flagging.
   int n_collapsed = 0;
@@ -567,7 +567,7 @@ int main(int argc, char **argv){
   // correct build has the same depressions no matter where the seams fall -- so an unequal node count is a
   // NECESSARY-condition symptom that the split changed the tree. It flags two things the diff must separate:
   // (1) a genuine seam artifact the collapse missed (a spurious extra depression -- a real bug to chase);
-  // (2) the STRUCTURAL PhaseCD tie-break sub-class -- at a TIED outlet, two basins rebuilt as a META vs one
+  // (2) the STRUCTURAL ConstructHierarchyAndVolumes tie-break sub-class -- at a TIED outlet, two basins rebuilt as a META vs one
   // ocean_linked into the other (same depressions + volume, but node count differs; kerry_test2 4 vs 3).
   // (2) changes serial output -> Richard-coordinated, acceptable under the volume-correct+valid-tree bar.
   // Note node count does NOT isolate (1) from all tie-break noise: the pure-ORDERING tie-break sub-class
@@ -593,7 +593,7 @@ int main(int argc, char **argv){
   // depressions -- same (pit_elev, out_elev, cell_count, dep_vol) -- ignoring the meta tree above them? This
   // separates the residual DIFFER classes from a real bug: if the leaf sets MATCH but STITCH-DIFFERs, the
   // ONLY difference is meta-tree SHAPE (the outlet-ordering + meta-vs-ocean_linked tie-break, both genuine
-  // PhaseC ties). A LEAFSET-DIFFER on a STITCH-DIFFER case would be an actual cell-assignment/basin residual.
+  // ConstructHierarchy ties). A LEAFSET-DIFFER on a STITCH-DIFFER case would be an actual cell-assignment/basin residual.
   {
     const auto leafset=[&](const dh::DepressionHierarchy<float>&D){
       std::vector<std::string> v;

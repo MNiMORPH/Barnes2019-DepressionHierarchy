@@ -2,7 +2,7 @@
 // (ENH-5), used by the in-process stitch (tools/dephier_stitch.cpp) and BOTH scans in the distributed
 // harness (tools/dephier_mpi.cpp: the full-grid oracle and the per-rank distributed path).
 //
-// WHY a re-derivation at all: the tiled build discards PhaseAB's per-tile `tile.outlets` and rebuilds
+// WHY a re-derivation at all: the tiled build discards FloodAndAssignDepressions's per-tile `tile.outlets` and rebuilds
 // the outlet set from the RESOLVED (post-conduit) label grid, because BOUNDARY endpoints are only
 // meaningful after conduit resolution and each rank must work from its own resolved labels (see the
 // ENH-2 rationale in dephier_stitch.cpp). That scan was independently TRIPLICATED, and the same

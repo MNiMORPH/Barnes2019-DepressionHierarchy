@@ -9,11 +9,11 @@
 // ships only its edge/graph up (main.cpp:328 saveGDAL vs :654 CommSend(job1)).
 //
 // INCREMENT 1 (this file): per-rank Phase A/B with a halo-exchanged BOUNDARY pre-label.
-//   * component 2 (per-rank PhaseAB) + component 3 (perimeter-strip exchange) of the plan.
+//   * component 2 (per-rank FloodAndAssignDepressions) + component 3 (perimeter-strip exchange) of the plan.
 //   * Each rank extracts its own DEM columns, exchanges its 1-column edge elevations with its
 //     seam neighbours via the shim, computes the BOUNDARY pre-label from own+halo columns
 //     (no full grid), and runs FloodAndAssignDepressions locally.
-//   * ORACLE: the same per-tile PhaseAB but with BOUNDARY computed from the FULL grid (the
+//   * ORACLE: the same per-tile FloodAndAssignDepressions but with BOUNDARY computed from the FULL grid (the
 //     tools/dephier_stitch.cpp per-tile step). The distributed label+fd must be bit-identical.
 //   Verifies: (a) the shim moves DH edge strips across a multi-rank line with no deadlock, and
 //   (b) BOUNDARY-from-a-1-column-halo == BOUNDARY-from-the-full-grid (the local-first claim).
@@ -206,7 +206,7 @@ int main(int argc, char **argv){
   const auto tile_of = [&](int x){ int t=0; while(t+1<(int)bounds.size() && x>=bounds[t+1]) t++; return t; };
   const auto is_ocean_full = [&](int x,int y){ return full.isNoData(x,y) || full(x,y)==ocean_level; };
 
-  // ---- ORACLE: per-tile PhaseAB with BOUNDARY from the FULL grid (dephier_stitch's step) ----
+  // ---- ORACLE: per-tile FloodAndAssignDepressions with BOUNDARY from the FULL grid (dephier_stitch's step) ----
   // Lowest strictly-downhill land neighbour on the full grid; ties by highest cell index
   // (radix pop order). Identical to the stitch's drain().
   const auto drain_full = [&](int x,int y,int &lx,int &ly,bool &to_ocean)->bool{
@@ -478,7 +478,7 @@ int main(int argc, char **argv){
       return { gx,gy, 1, OCEAN, 0,0 };
     };
     for(int y=0;y<H;y++)                                               // ALL BOUNDARY cells: the label
-      for(int gx=x0;gx<x1;gx++)                                        // spreads inward through PhaseAB,
+      for(int gx=x0;gx<x1;gx++)                                        // spreads inward through FloodAndAssignDepressions,
         if(label(gx-x0,y)==BOUNDARY) mylw.push_back(localwalk(gx,y));  // not just the seeded seam cells
     for(int gc : seam_cols)                                            // edge-column labels (EXIT targets
       for(int y=0;y<H;y++) myedge.push_back({ gc, y, glab(gc-x0,y) }); // land on a neighbour's edge column)
@@ -530,7 +530,7 @@ int main(int argc, char **argv){
 
     // ---- FLAT-LABEL RECONCILIATION (flag-gated; ENH-8) ----
     // The per-tile flood labels a seam-straddling flat's cells inconsistently across the seam; reconcile
-    // glab_pc to serial's EXACT partition (the pit-index flood replay) so the outlet scan + PhaseCD build
+    // glab_pc to serial's EXACT partition (the pit-index flood replay) so the outlet scan + ConstructHierarchyAndVolumes build
     // serial's tree, not just a volume-correct one. Fully per-rank: each rank replays the partition over an
     // ADAPTIVE halo it fetches from neighbours by a chained (systolic) column exchange -- a band advances one
     // tile per round, so a halo wider than one tile is relayed THROUGH the intervening ranks. Grow until the
@@ -976,7 +976,7 @@ int main(int argc, char **argv){
   // volumes with the DISTRIBUTED Phase D (each rank's own cells, reduced to rank 0) -- no rank
   // read a foreign tile's interior. Here we only contract seam artifacts and require the
   // canonical signature (which includes per-node cell_count and dep_vol) to equal serial's. ----
-  // Retire the collapse under the flat-label replay: with the correct partition, outlets->PhaseCD build
+  // Retire the collapse under the flat-label replay: with the correct partition, outlets->ConstructHierarchyAndVolumes build
   // serial's tree with no seam artifacts and the empty-leaf drop already compacted, so the collapse's
   // seam-dependent passes would only dissolve REAL structure -- exactly as retired in the stitch.
   const int n_collapsed = flat_replay ? 0 : CollapseSeamArtifacts(Gdist, full, bounds);
@@ -1006,7 +1006,7 @@ int main(int argc, char **argv){
   //   (1) genuine seam artifacts the collapse pass failed to contract -- a spurious extra depression
   //       (Corsica coastal leaf pre-NoData-fix; testdem8 rim fragment pre-Pass-B2; the residual
   //       split-10 kerry cases). These are real bugs to chase; the collapse should make node count agree.
-  //   (2) the STRUCTURAL sub-class of the PhaseCD tie-break: at a TIED outlet elevation two basins may be
+  //   (2) the STRUCTURAL sub-class of the ConstructHierarchyAndVolumes tie-break: at a TIED outlet elevation two basins may be
   //       rebuilt either as co-equal children of a META or with one ocean_linked into the other -- SAME
   //       depressions and volume, but meta-vs-ocean_linked changes the node count (kerry_test2: serial
   //       meta+2 leaves vs stitch 1 leaf + 1 ocean_linked, 4 vs 3 nodes). This CHANGES serial output ->
