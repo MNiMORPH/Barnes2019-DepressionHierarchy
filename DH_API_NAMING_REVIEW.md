@@ -23,8 +23,24 @@ not recalled.
 > (`f5b10f0`). Rec 3 — casing: `OutletSkip`/`OutletScanIntra`/`OutletScanSeam` to match the core's PascalCase
 > (`3658058`); `dh_canonical` test-internal helpers left lowercase. Rec 4 — comm backends symmetrized:
 > `CommStartup`/`CommShutdown` in both, matched no-ops in the shim (`10bf429`); real mpirun tests pass.
-> **Rec 5 (extract the ~500–600-line tool `main`s into named stage functions) NOT started** — bigger
-> structural churn, deferred pending an explicit go.
+> **Rec 5 (extract the ~500–600-line tool `main`s into named stage functions) DONE 2026-07-30**
+> (branch `refactor-dh-mpi-stages`, not yet merged to master). Both tool entry points now read as a
+> straight list of named stage calls over a per-run context struct:
+> - **`dephier_mpi.cpp`** — `RankCtx` (one tile's slice + env refs + `tile_of`/`elev`/`is_ocean`/
+>   `drain_local` accessors); `rank_main` is now just `RankCtx ctx(...)` + eleven stages:
+>   `setup_tile` → `flood_tile` → `remap_namespace` → `build_global_labels` → `resolve_conduits` →
+>   `reconcile_flats` (ENH-8, flag-gated) → `build_outlets` → `gather_and_assemble` →
+>   `construct_hierarchy_and_volumes` → `fix_flowdirs` → `ship_for_verify`. (`gmap` promoted to a
+>   file-scope fn; the flat-replay results + `Result` slot hoisted so the free stages can reference them.)
+> - **`dephier_stitch.cpp`** — `StitchState` (whole-grid env + built objects + the same helper methods);
+>   `main`'s build section is `StitchState st(...)` + seven stages: `build_tiles` → `assemble_globals` →
+>   `resolve_conduits` → `fix_flowdirs` → `reconcile_flats` (flag-gated) → `build_outlets` →
+>   `construct_hierarchy`; the verification/audit tail keeps its handles via a small alias block.
+>
+> Readability-only: every stage's body was moved verbatim (behind local bindings mirroring the former
+> names), so serial↔parallel bit-identity holds — shim `ctest` 30/30 and the real-`mpirun` tree tests
+> pass at every commit. **All of rec 1–5 is now done.** Remaining: merge the branch to master (Andy's
+> call) and fold the naming changes into the eventual upstream PR.
 
 ## TL;DR
 
