@@ -60,6 +60,28 @@ if(USE_GDAL AND GDAL_FOUND)
   # progress -> no race, and clean output. (Real MPI is one process per rank, so it doesn't need this.)
   target_compile_definitions(dephier_mpi.exe PRIVATE RICHDEM_NO_PROGRESS)
 
+  # Thread-safety guard: a ThreadSanitizer build of the same shim. The thread backend runs one rank per
+  # OS thread, so any code that isn't safe to run concurrently races here -- e.g. the fixed
+  # GDALAllRegister() heap-corruption race, which TSan detects DETERMINISTICALLY (every run), unlike a
+  # probabilistic stress loop. The wrapper runs with OMP_NUM_THREADS=1 and the target is built with
+  # RICHDEM_NO_PROGRESS, which remove the two known non-bugs at the source (a libgomp reduction false
+  # positive and the ProgressBar/std::cerr race) -- see thread_safety_tsan.sh for why suppressions aren't
+  # used. Opt-in (a TSan build changes all compile/link flags -> use a SEPARATE build dir:
+  # `cmake -DDH_BUILD_TSAN=ON ...`); local-only, like the MPI tests.
+  option(DH_BUILD_TSAN "Build the ThreadSanitizer thread-safety test target (local; separate build)" OFF)
+  if(DH_BUILD_TSAN)
+    add_executable(dephier_mpi_tsan.exe tools/dephier_mpi.cpp)
+    target_include_directories(dephier_mpi_tsan.exe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(dephier_mpi_tsan.exe PRIVATE RICHDEM_NO_PROGRESS)
+    target_compile_options(dephier_mpi_tsan.exe PRIVATE -fsanitize=thread -g -O1)
+    # -fsanitize=thread on the link line too (via target_link_libraries for CMake < 3.13 compatibility).
+    target_link_libraries(dephier_mpi_tsan.exe PRIVATE dephier richdem Threads::Threads -fsanitize=thread)
+    add_test(NAME mpi_thread_safety
+             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/thread_safety_tsan.sh
+                     $<TARGET_FILE:dephier_mpi_tsan.exe>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/test_cases/kerry_test10.dem 0 2,4,6,8)
+  endif()
+
   # Same harness compiled against the real-MPI comm backend (one rank per process; run with
   # `mpirun -np <ntiles>`). Validates the tree on rank 0. Only built when MPI is available.
   find_package(MPI)
