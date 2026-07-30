@@ -401,11 +401,27 @@ static void reconcile_flats(StitchState &st){
              <<" cells, leaves "<<old_leaves<<"->"<<nn<<" orphan_cells="<<orphan<<"\n";
 }
 
-// Stage 6: re-derive the global outlet set from the resolved label grid via the shared scan
-// (dh_outlets.hpp, ENH-5): intra-tile D8 adjacencies, then Barnes' HandleEdge across each internal
-// seam. The reduce keeps the pair's lowest out_elev (tie -> lower out_cell); OutletSkip drops a cell
-// only if NoData-and-not-OCEAN. Fills st.outlets. (See the long note at the call site for WHY this
-// re-derives rather than reusing FloodAndAssignDepressions's per-tile outlets.)
+// Stage 6: re-derive the global outlet set (Barnes' join) from the resolved label grid via the shared
+// scan (dh_outlets.hpp, ENH-5): intra-tile D8 adjacencies, then Barnes' HandleEdge across each internal
+// seam. Both feed one database keyed on the depression pair, keeping the lowest max-of-pair -- the serial
+// PhaseB rule (tie -> lower out_cell). OutletSkip drops a cell only if NoData-and-not-OCEAN. Fills
+// st.outlets.
+//
+// WHY re-derive here instead of reusing FloodAndAssignDepressions's per-tile `tile.outlets` (this is NOT
+// fluffy duplication -- it is load-bearing for the distributed build):
+//   * FloodAndAssignDepressions found its outlets in each tile's PRE-conduit labels (BOUNDARY sentinels
+//     included). The conduit pass then resolves every BOUNDARY cell to its true drain target, which
+//     changes *which* depressions actually meet. Re-deriving from the RESOLVED labels captures that for
+//     free; remapping `tile.outlets` through the resolution would be fiddly and error-prone.
+//   * In the real MPI build each rank re-derives from ITS OWN resolved labels locally (dephier_mpi does
+//     the same from glab_pc) -- no raw outlet set is shipped or merged. That locality is the whole point;
+//     `tile.outlets` is deliberately dropped.
+// THE COST (record it, so the risk is visible): this is a SECOND outlet-discovery path, and it must
+// reproduce FloodAndAssignDepressions's semantics faithfully or the two drift. One drift was a real bug:
+// a NoData cell is OCEAN (ocean_labels), so a basin->NoData-ocean adjacency is a genuine outlet; the scan
+// used to `continue` on all NoData cells and drop it, leaving the basin unclosed (inf volume). OutletSkip
+// closes that gap (skip a cell only if NoData AND not OCEAN). DH_AUDIT_OUTLETS audits for further drift by
+// diffing this set against FloodAndAssignDepressions's tile.outlets (see main).
 static void build_outlets(StitchState &st){
   const auto& full=st.full; const auto& bounds=st.bounds; auto& gLabel=st.gLabel; auto& outlets=st.outlets;
   const auto tile_of=[&](int x){ return st.tile_of(x); };
@@ -471,73 +487,24 @@ int main(int argc, char **argv){
     }
   }
   bounds.push_back(full.width());
-  const int ntiles = bounds.size() - 1;
 
   StitchState st(full, bounds, ocean_level, halo_cap);
-  // Transitional aliases: the build blocks below still read/write these as locals while each is
-  // lifted into a stage function on `st`; the verification section keeps using them afterwards.
-  auto& tiles    = st.tiles;
-  auto& n_global = st.n_global;
-  auto& G        = st.G;
-  auto& gLabel   = st.gLabel;
-  auto& gFix     = st.gFix;
-  auto& outlets  = st.outlets;
-  // Helpers delegate to st so there is one definition (the stage functions call st.* directly).
-  const auto tile_of  = [&](int x){ return st.tile_of(x); };
-  const auto is_ocean = [&](int x,int y){ return st.is_ocean(x,y); };
-  const auto drain    = [&](int x,int y,int &lx,int &ly,bool &to_ocean){ return st.drain(x,y,lx,ly,to_ocean); };
 
-  build_tiles(st);                              // per-tile flood -> st.tiles, st.n_global
-
+  // ---- build pipeline: run the stages in order; each reads/writes st (see the stage functions above) ----
+  build_tiles(st);                             // per-tile flood -> st.tiles, st.n_global
   assemble_globals(st);                        // remap tile labels -> global G + gLabel (BOUNDARY unresolved)
-
   resolve_conduits(st);                        // resolve BOUNDARY cells across seams -> gLabel
-
   fix_flowdirs(st);                            // seam flowdir fix-up + flat resolution -> gFix
-
-  // ---- global outlet set, in the distributable shape (Barnes' join): each tile
-  // derives its own outlets from its resolved labels (intra-tile adjacencies), and
-  // only the perimeter strips cross the seam via HandleEdge. Both feed one database
-  // keyed on the depression pair, keeping the lowest max-of-pair -- the serial PhaseB
-  // rule. Intra-tile + cross-seam together cover every adjacency, so the result is
-  // identical to a single global pass. ----
-  //
-  // WHY re-derive here instead of reusing FloodAndAssignDepressions's per-tile `tile.outlets` (this is NOT fluffy
-  // duplication -- it is load-bearing for the distributed build):
-  //   * FloodAndAssignDepressions found its outlets in each tile's PRE-conduit labels (BOUNDARY sentinels included).
-  //     The conduit pass then resolves every BOUNDARY cell to its true drain target, which changes
-  //     *which* depressions actually meet. Re-deriving from the RESOLVED labels captures that for
-  //     free; remapping `tile.outlets` through the resolution would be fiddly and error-prone.
-  //   * In the real MPI build each rank re-derives from ITS OWN resolved labels locally (dephier_mpi
-  //     does the same from glab_pc) -- no raw outlet set is shipped or merged. That locality is the
-  //     whole point; `tile.outlets` is deliberately dropped.
-  // THE COST (record it, so the risk is visible): this is a SECOND outlet-discovery path, and it must
-  // reproduce FloodAndAssignDepressions's semantics faithfully or the two drift. One drift was a real bug: a NoData cell
-  // is OCEAN (ocean_labels), so a basin->NoData-ocean adjacency is a genuine outlet; the scan used to
-  // `continue` on all NoData cells and drop it, leaving the basin unclosed (inf volume). The `skip()`
-  // below closes that gap (skip a cell only if NoData AND not OCEAN). A debug flag audits for further
-  // drift by diffing this set against FloodAndAssignDepressions's tile.outlets -- see DH_AUDIT_OUTLETS below.
-  // ---- FLAT-PARTITION REPLAY: reconstruct serial's exact cell->leaf partition (flag-gated; ROAD A) ----
-  // SPLIT_INVARIANT_FLATS_PLAN.md ROAD A. The tiled flood labels a divide/flat cell by a SEAM-DEPENDENT
-  // wavefront, so a cell can land in the wrong leaf -> wrong cell_count/dep_vol (the cell-assignment DIFFER
-  // class). Serial's label = the depression the FLOOD claims the cell into, which for flats is a geodesic
-  // partition tie-broken by the radix pop order -- NOT the pit a flowdir drains to (that mistake emptied
-  // sill-flat leaves; see the containment cc-pass finding). Here we REPLAY serial's flood-labelling exactly
-  // (proven bit-identical partition on 49 DEMs incl. Corsica + adversarial fractals; tools/
-  // flat_partition_replay_proof.cpp): seeds = every OCEAN cell + every land cell with NO strictly-lower
-  // neighbour (the land_seed/pit set, dephier.hpp:412 -- includes all flat interiors), each at its dem
-  // elevation; process elevation buckets ASCending, within a bucket HIGHEST-index first with same-elevation
-  // labels appended and popped LIFO (the fork radix_heap tie-break, radix_heap.hpp:391); a popped NO_DEP cell
-  // starts a new pit; ocean at its dem elevation, propagating OCEAN. Then map each replay-basin onto G's
-  // EXISTING leaf via that leaf's pit cell (the min leaf when a seam split one basin into several -> they
-  // merge) and overwrite gLabel; compact G. Structure follows: outlets are re-derived
-  // from this corrected gLabel, so ConstructHierarchyAndVolumes builds on serial's partition. Full-grid here (the flag's
-  // reproducibility trade); distributable later via ENH-1 seam-exchange replaying the flood ORDER across the
-  // seam. Default OFF => byte-identical.
   const bool flat_replay = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr;
-  if(flat_replay) reconcile_flats(st);          // reconstruct serial's exact flat partition -> G, gLabel
-
+  if(flat_replay) reconcile_flats(st);         // reconstruct serial's exact flat partition -> G, gLabel
   build_outlets(st);                           // re-derive the outlet set from the resolved labels -> outlets
+
+  // Handles for the audits + verification below (the build objects now live on st).
+  auto& tiles   = st.tiles;
+  auto& G       = st.G;
+  auto& gLabel  = st.gLabel;
+  auto& gFix    = st.gFix;
+  auto& outlets = st.outlets;
 
   // ---- DEBUG: audit the re-derived global outlet set against FloodAndAssignDepressions's own per-tile outlets ----
   // Set DH_AUDIT_OUTLETS=1 to diff the two outlet-discovery paths in real time. The re-derivation
