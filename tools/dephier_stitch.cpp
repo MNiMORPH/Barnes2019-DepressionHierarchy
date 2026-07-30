@@ -172,6 +172,31 @@ static void build_tiles(StitchState &st){
   st.n_global = next_offset;
 }
 
+// Stage 2: assemble the global depression list G and the global label grid gLabel by remapping each
+// tile's local labels into the global namespace (Tile::g). BOUNDARY cells stay unresolved here.
+static void assemble_globals(StitchState &st){
+  const auto& full=st.full; auto& tiles=st.tiles; const dh_label_t n_global=st.n_global;
+  auto& G=st.G; auto& gLabel=st.gLabel;
+  G = dh::DepressionHierarchy<float>(n_global);
+  G[0] = tiles[0].deps[0];
+  G[0].dep_label = 0;
+  for(auto &tile : tiles)
+    for(dh_label_t k=1;k<tile.deps.size();k++){
+      auto d = tile.deps[k];
+      d.dep_label = tile.g(k);
+      if(d.pit_cell!=dh::NO_VALUE){
+        int lx,ly; tile.dem.iToxy(d.pit_cell, lx, ly);
+        d.pit_cell = full.xyToI(tile.x0 + lx, ly);
+      }
+      G[tile.g(k)] = d;
+    }
+  gLabel = rd::Array2D<dh_label_t>(full.width(), full.height(), OCEAN);
+  for(auto &tile : tiles)
+    for(int y=0;y<tile.dem.height();y++)
+      for(int x=0;x<tile.dem.width();x++)
+        gLabel(tile.x0 + x, y) = tile.g(tile.label(x, y));
+}
+
 // Stage 3: conduit resolution (PARALLEL_DEPHIER_PLAN.md §3). A BOUNDARY cell is a through-flowing
 // cell whose drainage leaves its tile; find the real depression (or ocean) it ends in WITHOUT walking
 // the full grid. Phase 1 (per tile, LOCAL): follow the tile's own flowdirs from each BOUNDARY cell to
@@ -226,31 +251,6 @@ static void resolve_conduits(StitchState &st){
     std::vector<dh_label_t> resolved(bcells.size());
     for(size_t i=0;i<bcells.size();i++) resolved[i] = chase(bcells[i].first, bcells[i].second);
     for(size_t i=0;i<bcells.size();i++) gLabel(bcells[i].first, bcells[i].second) = resolved[i];
-}
-
-// Stage 2: assemble the global depression list G and the global label grid gLabel by remapping each
-// tile's local labels into the global namespace (Tile::g). BOUNDARY cells stay unresolved here.
-static void assemble_globals(StitchState &st){
-  const auto& full=st.full; auto& tiles=st.tiles; const dh_label_t n_global=st.n_global;
-  auto& G=st.G; auto& gLabel=st.gLabel;
-  G = dh::DepressionHierarchy<float>(n_global);
-  G[0] = tiles[0].deps[0];
-  G[0].dep_label = 0;
-  for(auto &tile : tiles)
-    for(dh_label_t k=1;k<tile.deps.size();k++){
-      auto d = tile.deps[k];
-      d.dep_label = tile.g(k);
-      if(d.pit_cell!=dh::NO_VALUE){
-        int lx,ly; tile.dem.iToxy(d.pit_cell, lx, ly);
-        d.pit_cell = full.xyToI(tile.x0 + lx, ly);
-      }
-      G[tile.g(k)] = d;
-    }
-  gLabel = rd::Array2D<dh_label_t>(full.width(), full.height(), OCEAN);
-  for(auto &tile : tiles)
-    for(int y=0;y<tile.dem.height();y++)
-      for(int x=0;x<tile.dem.width();x++)
-        gLabel(tile.x0 + x, y) = tile.g(tile.label(x, y));
 }
 
 // Stage 4: restore serial-identical per-cell flowdirs at seam crossings, then resolve flats. A tile
