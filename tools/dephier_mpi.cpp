@@ -156,9 +156,8 @@ struct FlatComm {
 };
 
 int main(int argc, char **argv){
-#ifdef DH_USE_MPI
-  commt::CommInitMPI();                     // one rank per process; must precede any CommRank/Size
-#endif
+  commt::CommStartup();                      // process lifecycle (MPI_Init; no-op for the shim). Must
+                                             // precede any CommRank/Size. Matched CommShutdown at the ends.
   if(argc!=4 && argc!=5){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
     return -1;
@@ -189,7 +188,7 @@ int main(int argc, char **argv){
     if(commt::CommRank()==0)
       std::cerr<<"error: "<<ntiles<<" tiles from the split but "<<commt::CommSize()
                <<" MPI ranks; launch with `mpirun -np "<<ntiles<<"`\n";
-    commt::CommFinalizeMPI();
+    commt::CommShutdown();
     return 1;
   }
 #endif
@@ -891,7 +890,7 @@ int main(int argc, char **argv){
     s.label.resize(nn); s.glab.resize(nn); s.glab_pc.resize(nn); s.fd.resize(nn); s.gfix.resize(nn);
     for(int i=0;i<nn;i++){ s.label[i]=R.label(i); s.glab[i]=R.glab(i); s.glab_pc[i]=R.glab_pc(i); s.fd[i]=R.fd(i); s.gfix[i]=R.gfix(i); }
     c::CommSend(s, 0, TAG_DISTSLICE);
-    commt::CommFinalizeMPI();
+    commt::CommShutdown();
     return 0;
   }
   for(int t=1;t<ntiles;t++){
@@ -1054,8 +1053,6 @@ int main(int argc, char **argv){
            <<" ranks="<<ntiles<<" fd_diff="<<fd_diff<<"/"<<fd_land<<" flat_diff="<<fd_flat<<"\n";
 
   const int rc = (phaseab_ok && remap_ok && conduit_ok && outlet_ok && tree_ok && flowdir_ok) ? 0 : 1;
-#ifdef DH_USE_MPI
-  commt::CommFinalizeMPI();
-#endif
+  commt::CommShutdown();                      // process lifecycle (MPI_Finalize; no-op for the shim)
   return rc;
 }

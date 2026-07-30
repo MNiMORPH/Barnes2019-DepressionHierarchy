@@ -37,7 +37,13 @@ inline thread_local int                 t_rank = 0;
 inline int CommRank(){ return t_rank; }
 inline int CommSize(){ return g_size; }
 
-// Spawn `n` thread-ranks, each running fn(). Joins them (CommFinalize is implicit).
+// Process lifecycle. No-ops for the thread backend (the threads' whole life is CommInit, which spawns
+// and joins them) -- matched with comm_mpi's MPI_Init/Finalize so the driver brackets the run the same
+// way under either backend.
+inline void CommStartup(){}
+inline void CommShutdown(){}
+
+// Spawn `n` thread-ranks, each running fn(). Joins them (CommShutdown is a no-op; join is in CommInit).
 template<class Fn>
 void CommInit(int n, Fn fn){
   g_size = n;

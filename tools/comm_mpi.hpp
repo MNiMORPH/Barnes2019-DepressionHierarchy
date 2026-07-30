@@ -4,13 +4,13 @@
 // process (launch with `mpirun -np <ntiles>`).
 //
 // API parity with comm_thread.hpp: CommRank/CommSize/CommSend<T>/CommRecv<T>/CommBarrier, plus
-// CommInitMPI/CommFinalizeMPI (MPI_Init/Finalize -- the process model differs from the shim's
-// thread-spawn, so the harness driver calls these explicitly under DH_USE_MPI). Messages are
-// cereal-serialized, matching (from,tag) exactly as the shim does.
+// CommStartup/CommShutdown (MPI_Init/Finalize here; no-ops in the shim, whose lifecycle is the
+// thread spawn/join inside CommInit -- so the harness driver brackets the run with them
+// unconditionally, no #ifdef). Messages are cereal-serialized, matching (from,tag) as the shim does.
 //
 // Sends are non-blocking (MPI_Isend), matching the shim's fire-and-forget queue semantics so the
 // harness's send-then-recv exchange patterns cannot deadlock. Each send's serialized buffer is
-// kept alive in a pending list and completed at CommFinalizeMPI -- validation-grade (buffers live
+// kept alive in a pending list and completed at CommShutdown -- validation-grade (buffers live
 // to the end); a production build would reclaim them per phase.
 #pragma once
 
@@ -30,8 +30,10 @@ namespace commt {
 
 inline std::list<std::pair<MPI_Request,std::string>> g_pending;   // in-flight Isend buffers
 
-inline void CommInitMPI(){ MPI_Init(nullptr, nullptr); }
-inline void CommFinalizeMPI(){
+// Process lifecycle. Matched with comm_thread's no-op CommStartup/CommShutdown so the driver can
+// bracket the run identically under either backend (no #ifdef around the lifecycle calls).
+inline void CommStartup(){ MPI_Init(nullptr, nullptr); }
+inline void CommShutdown(){
   for(auto &p : g_pending) MPI_Wait(&p.first, MPI_STATUS_IGNORE);
   g_pending.clear();
   MPI_Finalize();

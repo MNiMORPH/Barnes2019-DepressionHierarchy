@@ -9,7 +9,7 @@
 namespace c = commt;
 
 int main(){
-  c::CommInitMPI();
+  c::CommStartup();
   const int r = c::CommRank(), n = c::CommSize();
   int failures = 0;
 
@@ -33,6 +33,6 @@ int main(){
   }
 
   c::CommBarrier();
-  c::CommFinalizeMPI();
+  c::CommShutdown();
   return failures==0 ? 0 : 1;
 }
