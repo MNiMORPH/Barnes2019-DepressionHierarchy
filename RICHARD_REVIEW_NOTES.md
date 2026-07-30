@@ -17,6 +17,12 @@ complete (ENH-8) and **bit-identical to serial** across the fixture sweep — th
 serial-determinism changes #1–#3 here **plus** an exact *reproduction* of your flat labelling (the pit-index
 flood replay — NOT a serial change; it matches your algorithm rather than altering it).
 
+Two updates since (2026-07-30): (a) a **separate, ready-to-open RichDEM PR** — a thread-safety fix for
+`Array2D`'s `GDALAllRegister()` call (new section below); not a dephier change and not a serial-output
+change, so it stands on its own. (b) The fork's two tool entry points (`dephier_mpi.cpp`,
+`dephier_stitch.cpp`) were refactored into named stage pipelines (harness-only, bit-identical throughout);
+this doesn't touch your core, but it's why the harness reads differently than when you last saw it.
+
 ## Changes that CHANGE serial output (please review)
 
 Both are arguably fixes for *latent non-determinism* — the previous output depended on hash-map /
@@ -76,6 +82,28 @@ tree/labels for the affected cases, so they're yours to bless.
    three exterior checks were generalized `OCEAN` → `OCEAN||BOUNDARY` (seed gathering, no-seeds guard,
    pit-finding skip); input validation now permits `NO_DEP`/`OCEAN`/`BOUNDARY`. A serial run has no
    `BOUNDARY` cells, so serial output is unchanged (verified byte-identical).
+
+## Separate RichDEM PR (already prepared) — thread-safe GDAL registration
+
+Not a DepressionHierarchy change and not a serial-output change; a general RichDEM bug found while running
+`Array2D` under our thread-parallel harness, so it's a standalone `r-barnes/richdem` PR rather than part of
+the dephier review.
+
+`Array2D`'s default constructor calls `GDALAllRegister()` on **every** construction (and most other ctors
+delegate to it). `GDALAllRegister()` mutates GDAL's global driver registry and is **not thread-safe**, so
+constructing `Array2D`s concurrently on multiple threads races on that registry and corrupts the heap —
+an intermittent `malloc(): unaligned tcache chunk detected` abort (ThreadSanitizer pins it to concurrent
+`GDALAllRegister()` writes). Pre-registering once on the main thread is not enough; the concurrent
+re-invocations still race. Fix (one line, no new includes) — register once via a function-local static,
+which C++11 guarantees is once-only and thread-safe; also drops the redundant per-construction cost:
+
+```cpp
+static const bool gdal_registered = [](){ GDALAllRegister(); return true; }();
+```
+
+No behavioural change single-threaded; non-GDAL builds unaffected (`#ifdef USEGDAL`). Verified: 400/400
+clean stress runs + our full suite. A branch + PR body are staged against upstream `master` in a fresh
+checkout (`../richdem-gdal-pr`, branch `gdal-register-once`); our fork's submodule already carries the fix.
 
 ## Open design questions (co-scoping — full list in PARALLEL_DEPHIER_PLAN.md §10)
 
