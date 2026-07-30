@@ -58,10 +58,14 @@ tree/labels for the affected cases, so they're yours to bless.
 
 ## Changes that PRESERVE serial output (FYI, verified byte-identical)
 
-4. **`GetDepressionHierarchy` split into `PhaseAB` + `PhaseCD`** (`dephier.hpp`).
-   `PhaseAB` = flood + outlet discovery, exposing `{depressions, outlets}`; `PhaseCD` = hierarchy
-   assembly + volumes. `GetDepressionHierarchy` is retained as a thin serial wrapper (AB then CD) with
-   the original signature. A distributed build runs `PhaseAB` per tile and one global `PhaseCD`.
+4. **`GetDepressionHierarchy` split into exposed phase functions** (`dephier.hpp`).
+   `FloodAndAssignDepressions` = flood + outlet discovery (paper A-C), exposing `{depressions, outlets}`;
+   `ConstructHierarchy` = the grid-free hierarchy assembly (paper D); `ConstructHierarchyAndVolumes` =
+   `ConstructHierarchy` + volumes (§6.4), the central-only convenience. `GetDepressionHierarchy` is retained
+   as a thin serial wrapper (unchanged signature). A distributed build runs `FloodAndAssignDepressions` per
+   tile, one global `ConstructHierarchy`, and distributes the volume step. (Named to the paper, not shifted
+   letters — see `DH_API_NAMING_REVIEW.md`; earlier entries above still cite the old `PhaseAB/PhaseC/PhaseCD`
+   names, mapped there.)
    Verified: canonical signature identical before/after across all `test_cases` + synthetic trees, with
    a negative control (a deliberate perturbation moved 26/28 signatures).
 
