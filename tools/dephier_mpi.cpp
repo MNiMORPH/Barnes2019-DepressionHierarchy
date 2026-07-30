@@ -186,6 +186,19 @@ enum { TAG_L2R=1, TAG_R2L=2, TAG_COUNT=3, TAG_OFFSET=4,       // strip dirs; cou
 // identical on every rank; the arrays/objects are this rank's own, produced as the stages run. The
 // halo-aware accessors (elev/is_ocean/drain_local, over own columns + the two 1-column halos) and tile_of
 // are the utilities the stages share.
+// Per-tile result slot: the tile's grids + counts, filled by the oracle loop and by each rank's
+// ship_for_verify, then compared cell-for-cell in the verification section.
+struct Result {
+  rd::Array2D<dh_label_t> label;      // tile-LOCAL labels (OCEAN/BOUNDARY sentinels + local deps)
+  rd::Array2D<int8_t>     fd;
+  rd::Array2D<dh_label_t> glab;        // tile slice remapped into the GLOBAL namespace (pre-conduit)
+  rd::Array2D<dh_label_t> glab_pc;     // same, after conduit resolution (BOUNDARY cells resolved)
+  rd::Array2D<int8_t>     gfix;        // tile flood flowdirs with the seam fix-up applied (pre-flats)
+  int        nboundary = 0;
+  int        ndep      = 0;            // local depressions, excl. ocean node 0 (deps.size()-1)
+  dh_label_t offset    = 0;            // this tile's global label offset (prefix sum)
+};
+
 struct RankCtx {
   const rd::Array2D<float>& full;              // environment (same on every rank)
   const std::vector<int>&   bounds;
@@ -649,6 +662,128 @@ static void gather_and_assemble(RankCtx &ctx, bool flat_replay, dh_label_t n_glo
     }
 }
 
+// Stage 9: Phase C (rank 0, grid-free assembly) + distributed Phase D (marginal volumes). Rank 0
+// assembles the hierarchy from the gathered records + distributed outlet set, then broadcasts the
+// light tree (out_elev + parent per node). Each rank computes the marginal (cell_count,
+// total_elevation) contribution of ITS OWN cells -- the exact per-cell walk-up of
+// CalculateMarginalVolumes, but tile-local -- and the O(#deps) partials reduce to rank 0, which
+// applies them and runs the grid-free CalculateTotalVolumes. No rank but the owner reads any cell,
+// so the last full-grid dependency (Phase D) is now distributed.
+static void construct_hierarchy_and_volumes(RankCtx &ctx, std::map<OutKey,OutVal> &outlet_db_dist,
+                                            dh::DepressionHierarchy<float> &Gdist){
+  const int r=ctx.r, x0=ctx.x0, x1=ctx.x1, H=ctx.H, ntiles=ctx.ntiles;
+  auto& dem=ctx.dem; auto& glab_pc=ctx.glab_pc;
+    c::CommBarrier();
+    std::vector<float>      tree_out_elev;
+    std::vector<dh_label_t> tree_parent;
+    if(r==0){
+      std::vector<dh::Outlet<float>> outlets;
+      for(const auto &kv : outlet_db_dist){
+        dh::Outlet<float> o; o.depa=kv.first.first; o.depb=kv.first.second;
+        o.out_elev=kv.second.first; o.out_cell=kv.second.second; outlets.push_back(o);
+      }
+      dh::ConstructHierarchy<float>(Gdist, outlets);   // grid-free; grows Gdist with meta nodes
+      const dh_label_t T = Gdist.size();
+      tree_out_elev.resize(T); tree_parent.resize(T);
+      for(dh_label_t i=0;i<T;i++){ tree_out_elev[i]=Gdist[i].out_elev; tree_parent[i]=Gdist[i].parent; }
+      for(int t=1;t<ntiles;t++){ c::CommSend(tree_out_elev,t,TAG_TREE_E); c::CommSend(tree_parent,t,TAG_TREE_P); }
+    } else {
+      c::CommRecv(tree_out_elev, 0, TAG_TREE_E);
+      c::CommRecv(tree_parent,   0, TAG_TREE_P);
+    }
+    const dh_label_t T = tree_out_elev.size();
+    std::vector<uint32_t> dcount(T, 0);
+    std::vector<double>   delev (T, 0.0);
+    for(int y=0;y<H;y++) for(int gx=x0;gx<x1;gx++){             // this rank's own cells only
+      if(dem.isNoData(gx-x0,y)) continue;
+      const float me = dem(gx-x0,y);
+      dh_label_t cl = glab_pc(gx-x0,y);
+      while(cl!=OCEAN && me > tree_out_elev[cl]) cl = tree_parent[cl];   // walk up to the depression it belongs to
+      if(cl==OCEAN) continue;
+      dcount[cl]++; delev[cl]+=me;
+    }
+    if(r==0){
+      for(int t=1;t<ntiles;t++){
+        std::vector<uint32_t> dc; std::vector<double> de;
+        c::CommRecv(dc,t,TAG_MARG_C); c::CommRecv(de,t,TAG_MARG_E);
+        for(dh_label_t i=0;i<T;i++){ dcount[i]+=dc[i]; delev[i]+=de[i]; }
+      }
+      for(dh_label_t i=0;i<T;i++){ Gdist[i].cell_count += dcount[i]; Gdist[i].total_elevation += delev[i]; }
+      dh::CalculateTotalVolumes<float>(Gdist);                 // grid-free rollup
+    } else {
+      c::CommSend(dcount,0,TAG_MARG_C); c::CommSend(delev,0,TAG_MARG_E);
+    }
+}
+
+// Stage 10: per-cell flowdir seam fix-up (eng-doc section 6, non-flat crossings) + ENH-1 flats.
+// A tile flood cannot point a cell across its own boundary, so a cell whose true drainage exits the
+// tile is left NO_FLOW (a land seam seed) or points at the wrong ocean cell. Every other cell already
+// matches serial. Restore serial's choice using ONLY the 1-column halo: a land seam seed points to
+// its lowest cross-tile neighbour at/below its pit (highest-index tie); a sea-draining cell points to
+// its highest-index adjacent ocean cell. Then resolve THIS tile's flats per-rank (bit-identical to
+// serial) via three monotone relaxations with a per-round seam exchange + convergence all-reduce.
+static void fix_flowdirs(RankCtx &ctx){
+  const int r=ctx.r, x0=ctx.x0, x1=ctx.x1, w=ctx.w, H=ctx.H, W=ctx.W, ntiles=ctx.ntiles;
+  auto& dem=ctx.dem; auto& fd=ctx.fd; auto& label=ctx.label; auto& gfix=ctx.gfix;
+  auto& haloL=ctx.haloL; auto& haloR=ctx.haloR;
+  const auto elev     = [&](int gx,int y){ return ctx.elev(gx,y); };
+  const auto is_ocean = [&](int gx,int y){ return ctx.is_ocean(gx,y); };
+    const auto isnodata=[&](int gx,int y)->bool{
+      if(gx>=x0 && gx<x1) return dem.isNoData(gx-x0,y);
+      if(gx==x0-1)        return haloL.nodata[y];
+      return haloR.nodata[y];
+    };
+    const auto gidx=[&](int gx,int y)->int64_t{ return (int64_t)y*W+gx; };
+    const auto dir_to=[&](int dx,int dy)->int8_t{ for(int n=1;n<=8;n++) if(rd::d8x[n]==dx && rd::d8y[n]==dy) return (int8_t)n; return rd::NO_FLOW; };
+    gfix = fd;                                                   // start from the tile's flood flowdirs (ctx-aliased)
+    for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++){
+      const int gx=x0+lx;
+      if(fd(lx,y)==rd::NO_FLOW && !dem.isNoData(lx,y) && label(lx,y)!=OCEAN){
+        const float fe=dem(lx,y); const int64_t fi=gidx(gx,y);
+        int bnx=0,bny=0; int64_t bi=-1; float be=std::numeric_limits<float>::infinity();
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+          if(!dx && !dy) continue;
+          const int nx=gx+dx, ny=y+dy;
+          if(nx<0||nx>=W||ny<0||ny>=H || isnodata(nx,ny)) continue;
+          if(!(nx<x0 || nx>=x1)) continue;                       // cross-seam neighbours only
+          const float e=elev(nx,ny); if(e>fe) continue;          // at or below the pit
+          const int64_t idx=gidx(nx,ny);
+          if(e<be || (e==be && idx>bi)){ be=e; bi=idx; bnx=nx; bny=ny; }
+        }
+        if(bi>=0 && (be<fe || bi>fi)) gfix(lx,y)=dir_to(bnx-gx, bny-y);
+      } else if(label(lx,y)==OCEAN && !dem.isNoData(lx,y)){       // sea-draining cell
+        int64_t bi=-1; int bnx=0,bny=0;
+        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
+          if(!dx && !dy) continue;
+          const int nx=gx+dx, ny=y+dy;
+          if(nx<0||nx>=W||ny<0||ny>=H || !is_ocean(nx,ny)) continue;
+          const int64_t idx=gidx(nx,ny);
+          if(idx>bi){ bi=idx; bnx=nx; bny=ny; }
+        }
+        if(bi>=0 && (bnx<x0 || bnx>=x1)) gfix(lx,y)=dir_to(bnx-gx, bny-y);
+      }
+    }
+
+    // ENH-1: resolve THIS tile's flats per-rank (bit-identical to serial), holding only the tile + a
+    // 1-column halo -- three monotone relaxations with a per-round seam exchange + convergence all-reduce.
+    { FlatComm fc{r, ntiles, r>0, r<ntiles-1, TAG_FLAT_L, TAG_FLAT_R, TAG_FLAT_CHG, TAG_FLAT_CONT};
+      ResolveFlatFlowdirsRelaxedPerRank(dem, gfix, fc); }
+}
+
+// Stage 11: ship this rank's results into its dist[] slot (ranks write disjoint slots) and barrier.
+static void ship_for_verify(RankCtx &ctx, std::vector<Result> &dist){
+  const int r=ctx.r;
+    dist[r].label = std::move(ctx.label);                        // ranks write disjoint slots
+    dist[r].gfix  = std::move(ctx.gfix);
+    dist[r].fd    = std::move(ctx.fd);
+    dist[r].glab  = std::move(ctx.glab);
+    dist[r].glab_pc = std::move(ctx.glab_pc);
+    dist[r].nboundary = ctx.nboundary;
+    dist[r].ndep  = (int)ctx.deps.size() - 1;
+    dist[r].offset= ctx.myoffset;
+    c::CommBarrier();
+}
+
 int main(int argc, char **argv){
   commt::CommStartup();                      // process lifecycle (MPI_Init; no-op for the shim). Must
                                              // precede any CommRank/Size. Matched CommShutdown at the ends.
@@ -717,16 +852,6 @@ int main(int argc, char **argv){
     return found;
   };
 
-  struct Result {
-    rd::Array2D<dh_label_t> label;      // tile-LOCAL labels (OCEAN/BOUNDARY sentinels + local deps)
-    rd::Array2D<int8_t>     fd;
-    rd::Array2D<dh_label_t> glab;        // tile slice remapped into the GLOBAL namespace (pre-conduit)
-    rd::Array2D<dh_label_t> glab_pc;     // same, after conduit resolution (BOUNDARY cells resolved)
-    rd::Array2D<int8_t>     gfix;        // tile flood flowdirs with the seam fix-up applied (pre-flats)
-    int        nboundary = 0;
-    int        ndep      = 0;            // local depressions, excl. ocean node 0 (deps.size()-1)
-    dh_label_t offset    = 0;            // this tile's global label offset (prefix sum)
-  };
   std::vector<Result> oracle(ntiles), dist(ntiles);
 
   for(int t=0;t<ntiles;t++){
@@ -843,25 +968,13 @@ int main(int argc, char **argv){
   // Default OFF => unchanged byte-for-byte.
   const bool flat_replay = std::getenv("DH_FLAT_PARTITION_REPLAY")!=nullptr;
 
+  // The per-rank pipeline: build a RankCtx, then run the stages in order. Each stage reads/writes
+  // ctx members (and the rank-0 aggregates passed by reference); no rank reads a foreign tile
+  // interior. This is a straight transcription of the eng-doc component order.
   auto rank_main = [&](){
-    const int r  = c::CommRank();
-    const int x0 = bounds[r], x1 = bounds[r+1], w = x1-x0;
-    RankCtx ctx(full, bounds, W, H, ntiles, ocean_level, halo_cap, r);
-    // Reference-aliases into ctx so the existing body reads unchanged while stages are lifted out
-    // incrementally (extracted stages take ctx and use ctx.* directly). Removed once all stages are out.
-    auto& dem=ctx.dem; auto& label=ctx.label; auto& fd=ctx.fd; auto& glab=ctx.glab;
-    auto& glab_pc=ctx.glab_pc; auto& gfix=ctx.gfix; auto& deps=ctx.deps; auto& outlets=ctx.outlets;
-    auto& myoffset=ctx.myoffset; auto& haloL=ctx.haloL; auto& haloR=ctx.haloR;
-    auto& fl_relabel=ctx.fl_relabel; auto& fl_ndense=ctx.fl_ndense; auto& fl_pitstamp=ctx.fl_pitstamp;
+    RankCtx ctx(full, bounds, W, H, ntiles, ocean_level, halo_cap, c::CommRank());
 
     setup_tile(ctx);                              // own columns, ocean labels, halo exchange, BOUNDARY pre-label
-
-    // Halo-aware accessors (on ctx); local lambdas delegate so the body below reads unchanged.
-    const auto elev       = [&](int gx,int y){ return ctx.elev(gx,y); };
-    const auto is_ocean   = [&](int gx,int y){ return ctx.is_ocean(gx,y); };
-    const auto drain_local= [&](int gx,int y,int &lx,int &ly,bool &to_ocean){ return ctx.drain_local(gx,y,lx,ly,to_ocean); };
-    (void)is_ocean;                               // (used by later stages; silence unused if a stage is lifted out)
-
     flood_tile(ctx);                              // Phase A/B/C on this tile's own columns
     remap_namespace(ctx, n_global_r0);            // per-tile counts -> global offsets (ctx.myoffset)
     build_global_labels(ctx);                     // this rank's slice into the global namespace (ctx.glab)
@@ -874,110 +987,9 @@ int main(int argc, char **argv){
 
     gather_and_assemble(ctx, flat_replay, n_global_r0, Gdist);   // ship leaf records -> rank 0's Gdist
 
-    // ---- Phase C (rank 0, grid-free assembly) + distributed Phase D (marginal volumes) ----
-    // Rank 0 assembles the hierarchy from the gathered records + distributed outlet set, then
-    // broadcasts the light tree (out_elev + parent per node). Each rank computes the marginal
-    // (cell_count, total_elevation) contribution of ITS OWN cells -- the exact per-cell walk-up
-    // of CalculateMarginalVolumes, but tile-local -- and the O(#deps) partials reduce to rank 0,
-    // which applies them and runs the grid-free CalculateTotalVolumes. No rank but the owner
-    // reads any cell, so the last full-grid dependency (Phase D) is now distributed.
-    c::CommBarrier();
-    std::vector<float>      tree_out_elev;
-    std::vector<dh_label_t> tree_parent;
-    if(r==0){
-      std::vector<dh::Outlet<float>> outlets;
-      for(const auto &kv : outlet_db_dist){
-        dh::Outlet<float> o; o.depa=kv.first.first; o.depb=kv.first.second;
-        o.out_elev=kv.second.first; o.out_cell=kv.second.second; outlets.push_back(o);
-      }
-      dh::ConstructHierarchy<float>(Gdist, outlets);   // grid-free; grows Gdist with meta nodes
-      const dh_label_t T = Gdist.size();
-      tree_out_elev.resize(T); tree_parent.resize(T);
-      for(dh_label_t i=0;i<T;i++){ tree_out_elev[i]=Gdist[i].out_elev; tree_parent[i]=Gdist[i].parent; }
-      for(int t=1;t<ntiles;t++){ c::CommSend(tree_out_elev,t,TAG_TREE_E); c::CommSend(tree_parent,t,TAG_TREE_P); }
-    } else {
-      c::CommRecv(tree_out_elev, 0, TAG_TREE_E);
-      c::CommRecv(tree_parent,   0, TAG_TREE_P);
-    }
-    const dh_label_t T = tree_out_elev.size();
-    std::vector<uint32_t> dcount(T, 0);
-    std::vector<double>   delev (T, 0.0);
-    for(int y=0;y<H;y++) for(int gx=x0;gx<x1;gx++){             // this rank's own cells only
-      if(dem.isNoData(gx-x0,y)) continue;
-      const float me = dem(gx-x0,y);
-      dh_label_t cl = glab_pc(gx-x0,y);
-      while(cl!=OCEAN && me > tree_out_elev[cl]) cl = tree_parent[cl];   // walk up to the depression it belongs to
-      if(cl==OCEAN) continue;
-      dcount[cl]++; delev[cl]+=me;
-    }
-    if(r==0){
-      for(int t=1;t<ntiles;t++){
-        std::vector<uint32_t> dc; std::vector<double> de;
-        c::CommRecv(dc,t,TAG_MARG_C); c::CommRecv(de,t,TAG_MARG_E);
-        for(dh_label_t i=0;i<T;i++){ dcount[i]+=dc[i]; delev[i]+=de[i]; }
-      }
-      for(dh_label_t i=0;i<T;i++){ Gdist[i].cell_count += dcount[i]; Gdist[i].total_elevation += delev[i]; }
-      dh::CalculateTotalVolumes<float>(Gdist);                 // grid-free rollup
-    } else {
-      c::CommSend(dcount,0,TAG_MARG_C); c::CommSend(delev,0,TAG_MARG_E);
-    }
-
-    // ---- per-cell flowdir seam fix-up (eng-doc section 6, non-flat crossings) ----
-    // A tile flood cannot point a cell across its own boundary, so a cell whose true drainage
-    // exits the tile is left NO_FLOW (a land seam seed) or points at the wrong ocean cell. Every
-    // other cell already matches serial. Restore serial's choice using ONLY the 1-column halo:
-    // a land seam seed points to its lowest cross-tile neighbour at/below its pit (highest-index
-    // tie); a sea-draining cell points to its highest-index adjacent ocean cell. O(boundary).
-    const auto isnodata=[&](int gx,int y)->bool{
-      if(gx>=x0 && gx<x1) return dem.isNoData(gx-x0,y);
-      if(gx==x0-1)        return haloL.nodata[y];
-      return haloR.nodata[y];
-    };
-    const auto gidx=[&](int gx,int y)->int64_t{ return (int64_t)y*W+gx; };
-    const auto dir_to=[&](int dx,int dy)->int8_t{ for(int n=1;n<=8;n++) if(rd::d8x[n]==dx && rd::d8y[n]==dy) return (int8_t)n; return rd::NO_FLOW; };
-    gfix = fd;                                                   // start from the tile's flood flowdirs (ctx-aliased)
-    for(int y=0;y<H;y++) for(int lx=0;lx<w;lx++){
-      const int gx=x0+lx;
-      if(fd(lx,y)==rd::NO_FLOW && !dem.isNoData(lx,y) && label(lx,y)!=OCEAN){
-        const float fe=dem(lx,y); const int64_t fi=gidx(gx,y);
-        int bnx=0,bny=0; int64_t bi=-1; float be=std::numeric_limits<float>::infinity();
-        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
-          if(!dx && !dy) continue;
-          const int nx=gx+dx, ny=y+dy;
-          if(nx<0||nx>=W||ny<0||ny>=H || isnodata(nx,ny)) continue;
-          if(!(nx<x0 || nx>=x1)) continue;                       // cross-seam neighbours only
-          const float e=elev(nx,ny); if(e>fe) continue;          // at or below the pit
-          const int64_t idx=gidx(nx,ny);
-          if(e<be || (e==be && idx>bi)){ be=e; bi=idx; bnx=nx; bny=ny; }
-        }
-        if(bi>=0 && (be<fe || bi>fi)) gfix(lx,y)=dir_to(bnx-gx, bny-y);
-      } else if(label(lx,y)==OCEAN && !dem.isNoData(lx,y)){       // sea-draining cell
-        int64_t bi=-1; int bnx=0,bny=0;
-        for(int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++){
-          if(!dx && !dy) continue;
-          const int nx=gx+dx, ny=y+dy;
-          if(nx<0||nx>=W||ny<0||ny>=H || !is_ocean(nx,ny)) continue;
-          const int64_t idx=gidx(nx,ny);
-          if(idx>bi){ bi=idx; bnx=nx; bny=ny; }
-        }
-        if(bi>=0 && (bnx<x0 || bnx>=x1)) gfix(lx,y)=dir_to(bnx-gx, bny-y);
-      }
-    }
-
-    // ENH-1: resolve THIS tile's flats per-rank (bit-identical to serial), holding only the tile + a
-    // 1-column halo -- three monotone relaxations with a per-round seam exchange + convergence all-reduce.
-    { FlatComm fc{r, ntiles, r>0, r<ntiles-1, TAG_FLAT_L, TAG_FLAT_R, TAG_FLAT_CHG, TAG_FLAT_CONT};
-      ResolveFlatFlowdirsRelaxedPerRank(dem, gfix, fc); }
-
-    dist[r].label = std::move(label);                            // ranks write disjoint slots
-    dist[r].gfix  = std::move(gfix);
-    dist[r].fd    = std::move(fd);
-    dist[r].glab  = std::move(glab);
-    dist[r].glab_pc = std::move(glab_pc);
-    dist[r].nboundary = ctx.nboundary;
-    dist[r].ndep  = (int)deps.size() - 1;
-    dist[r].offset= myoffset;
-    c::CommBarrier();
+    construct_hierarchy_and_volumes(ctx, outlet_db_dist, Gdist);  // Phase C + distributed Phase D volumes
+    fix_flowdirs(ctx);                            // seam flowdir fix-up + ENH-1 per-rank flats (ctx.gfix)
+    ship_for_verify(ctx, dist);                   // write this rank's dist[] slot + final barrier
   };
   c::CommInit(ntiles, rank_main);
 
