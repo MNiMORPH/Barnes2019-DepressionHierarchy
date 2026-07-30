@@ -6,8 +6,17 @@ the **core phase functions** (`include/dephier/dephier.hpp`) and the **distribut
 which reviews the *core public API from the WTM consumer's outside view*; this one is the authors' inside
 view, focused on **naming consistency and granularity** — the "functions have gotten a bit wild" concern.
 
-Written by Claude with A. Wickert, 2026-07-30. **Review/opinion only — no code changed here.** Every line
-reference checked against source on 2026-07-30, not recalled.
+Written by Claude with A. Wickert, 2026-07-30. Every line reference checked against source on 2026-07-30,
+not recalled.
+
+> **STATUS — rec 1 (core phase rename) DONE 2026-07-30** (commits `a890659` rename + `9ddd4c0` comment
+> reframing). Authoritative old→new mapping (older docs still use the old names as historical record; this is
+> the translation):
+> `GetDepressionHierarchyPhaseAB` → **`FloodAndAssignDepressions`** (paper A+B+C, one grid pass);
+> `GetDepressionHierarchyPhaseC` → **`ConstructHierarchy`** (paper D, grid-free primitive);
+> `GetDepressionHierarchyPhaseCD` → **`ConstructHierarchyAndVolumes`** (central-only convenience);
+> `GetDepressionHierarchy` unchanged. Paper letters now live in `dephier.hpp` comments where they apply.
+> Recs 2–5 (tool-helper names, casing, comm symmetry, monolith extraction) not yet started.
 
 ## TL;DR
 
