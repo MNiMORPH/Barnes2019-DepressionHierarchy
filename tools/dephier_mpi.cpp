@@ -65,6 +65,10 @@ using dh::OCEAN;
 using dh::NO_DEP;
 using dh::BOUNDARY;
 
+// Outlet DB key/value: one entry per depression pair -> (outlet elevation, outlet cell index).
+using OutKey = std::pair<dh_label_t,dh_label_t>;
+using OutVal = std::pair<float,int64_t>;
+
 // ---- small helpers (shared with the in-process stitch; kept identical) ----
 static rd::Array2D<float> extract_cols(const rd::Array2D<float> &full, int x0, int x1){
   rd::Array2D<float> t(x1 - x0, full.height());
@@ -81,6 +85,14 @@ static rd::Array2D<dh_label_t> ocean_labels(const rd::Array2D<float> &dem, float
     if(dem.isNoData(i) || dem(i)==ocean_level)
       label(i) = OCEAN;
   return label;
+}
+
+// Local label -> global label. Sentinels (OCEAN, BOUNDARY) are global as-is; a real local
+// depression k maps to offset+(k-1). Identical to Tile::g() in the stitch. Used by both the
+// oracle section and the distributed rank stages.
+static dh_label_t gmap(dh_label_t local, dh_label_t offset){
+  if(local==OCEAN || local==BOUNDARY) return local;
+  return offset + (local - 1);
 }
 
 // A 1-column perimeter strip: elevation + ocean flag down a seam-edge column. This is the
@@ -190,6 +202,11 @@ struct RankCtx {
   int                             nboundary = 0;   // BOUNDARY cells pre-labelled (for verification)
   std::vector<int>                seam_cols;        // this tile's internal-seam edge columns
   EdgeStrip                       haloL, haloR;
+  // Flat-label reconciliation (ENH-8) results, produced in reconcile_flats and consumed in
+  // gather_and_assemble (rank 0 only; empty when DH_FLAT_PARTITION_REPLAY is off).
+  std::vector<dh_label_t>         fl_relabel;       // old global label -> dense survivor id, or NO_VALUE if dropped
+  dh_label_t                      fl_ndense = 0;    // compacted node count (survivors + ocean)
+  std::map<dh_label_t,int64_t>    fl_pitstamp;      // survivor global label -> true pit global cell (stitch-style stamp)
 
   RankCtx(const rd::Array2D<float>& full_, const std::vector<int>& bounds_, int W_, int H_, int ntiles_,
           float ocean_level_, int halo_cap_, int rank)
@@ -337,13 +354,6 @@ int main(int argc, char **argv){
   };
   std::vector<Result> oracle(ntiles), dist(ntiles);
 
-  // Local label -> global label. Sentinels (OCEAN, BOUNDARY) are global as-is; a real local
-  // depression k maps to offset+(k-1). Identical to Tile::g() in the stitch.
-  const auto gmap = [&](dh_label_t local, dh_label_t offset)->dh_label_t{
-    if(local==OCEAN || local==BOUNDARY) return local;
-    return offset + (local - 1);
-  };
-
   for(int t=0;t<ntiles;t++){
     const int x0=bounds[t], x1=bounds[t+1];
     rd::Array2D<float>     dem   = extract_cols(full, x0, x1);
@@ -423,8 +433,6 @@ int main(int argc, char **argv){
   // entry per depression pair, holding the outlet = the higher-elevation cell of the pair,
   // keeping the LOWEST such max per pair (first-seen wins ties). Intra-tile adjacencies, then
   // Barnes' HandleEdge across each seam. This is the object the distributed build must rebuild.
-  using OutKey = std::pair<dh_label_t,dh_label_t>;
-  using OutVal = std::pair<float,int64_t>;                 // (out_elev, out_cell)
   // Tie-break (WATCH note, resolved): on EQUAL outlet elevation keep the LOWER out_cell. This
   // reproduces the stitch's global-row-major "first-seen at lowest max" (first-seen in row-major
   // at a given elevation IS the lowest-index cell) as an order-INDEPENDENT rule, so the
@@ -469,6 +477,7 @@ int main(int argc, char **argv){
     auto& dem=ctx.dem; auto& label=ctx.label; auto& fd=ctx.fd; auto& glab=ctx.glab;
     auto& glab_pc=ctx.glab_pc; auto& gfix=ctx.gfix; auto& deps=ctx.deps; auto& outlets=ctx.outlets;
     auto& myoffset=ctx.myoffset; auto& haloL=ctx.haloL; auto& haloR=ctx.haloR;
+    auto& fl_relabel=ctx.fl_relabel; auto& fl_ndense=ctx.fl_ndense; auto& fl_pitstamp=ctx.fl_pitstamp;
 
     setup_tile(ctx);                              // own columns, ocean labels, halo exchange, BOUNDARY pre-label
 
@@ -586,9 +595,6 @@ int main(int argc, char **argv){
     // cap. Then map each owned cell to serial's partition using the stitch's proven canonicalisation (survivor
     // = min global leaf label among leaves whose pit lies in the basin + a true-pit stamp) and reduce the
     // O(#deps) survivor map to rank 0. No rank reads a foreign tile interior -> footprint O(N/P)+O(cap*bnd).
-    std::vector<dh_label_t> fl_relabel;   // (rank 0) old global label -> dense survivor id, or NO_VALUE if dropped
-    dh_label_t              fl_ndense=0;   // (rank 0) compacted node count (survivors + ocean)
-    std::map<dh_label_t,int64_t> fl_pitstamp;  // (rank 0) survivor global label -> true pit global cell (stitch-style stamp)
     if(flat_replay){
       const int cap = std::min(halo_cap, W);          // cap columns per side; default (INT_MAX)->W = adaptive/unbounded
       rd::Array2D<dh_label_t> gc_owned(w,H,OCEAN);   // survivor label per owned cell
