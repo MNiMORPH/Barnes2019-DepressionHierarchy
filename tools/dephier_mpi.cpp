@@ -274,6 +274,42 @@ static void setup_tile(RankCtx &ctx){
     }
 }
 
+// Stage 2: flood this tile (Phase A/B/C on its own columns). Fills ctx.fd/deps/outlets.
+static void flood_tile(RankCtx &ctx){
+  ctx.fd = rd::Array2D<int8_t>(ctx.dem.width(), ctx.dem.height(), rd::NO_FLOW);
+  dh::FloodAndAssignDepressions<float,rd::Topology::D8>(ctx.dem, ctx.label, ctx.fd, ctx.deps, ctx.outlets, /*permit_without_baselevel_seed=*/true);
+}
+
+// Stage 3: namespace remap (eng-doc component 6): gather per-tile depression counts to rank 0,
+// prefix-sum into global offsets, scatter each rank its offset. This is the shim analogue of
+// MPI_Allgather(count) + prefix sum -- O(ntiles) tiny messages, no per-cell data. Sets ctx.myoffset;
+// rank 0 also writes n_global_r0 (1 + total depressions across tiles).
+static void remap_namespace(RankCtx &ctx, dh_label_t &n_global_r0){
+  const int r=ctx.r, ntiles=ctx.ntiles;
+  const int mycount = (int)ctx.deps.size() - 1;
+  ctx.myoffset = 1;
+  if(r==0){
+    std::vector<int> counts(ntiles); counts[0]=mycount;
+    for(int t=1;t<ntiles;t++) c::CommRecv(counts[t], t, TAG_COUNT);
+    dh_label_t off = 1;
+    for(int t=0;t<ntiles;t++){                                  // prefix sum in tile order
+      const dh_label_t this_off = off; off += counts[t];
+      if(t==0) ctx.myoffset = this_off; else c::CommSend(this_off, t, TAG_OFFSET);
+    }
+    n_global_r0 = off;                                          // 1 + total depressions across tiles
+  } else {
+    c::CommSend(mycount, 0, TAG_COUNT);
+    c::CommRecv(ctx.myoffset, 0, TAG_OFFSET);
+  }
+}
+
+// Stage 4: map this rank's local labels into the global namespace (its own slice; no gather).
+static void build_global_labels(RankCtx &ctx){
+  const int w=ctx.w, H=ctx.H;
+  ctx.glab = rd::Array2D<dh_label_t>(w, H);
+  for(int y=0;y<H;y++) for(int x=0;x<w;x++) ctx.glab(x,y) = gmap(ctx.label(x,y), ctx.myoffset);
+}
+
 int main(int argc, char **argv){
   commt::CommStartup();                      // process lifecycle (MPI_Init; no-op for the shim). Must
                                              // precede any CommRank/Size. Matched CommShutdown at the ends.
@@ -487,31 +523,9 @@ int main(int argc, char **argv){
     const auto drain_local= [&](int gx,int y,int &lx,int &ly,bool &to_ocean){ return ctx.drain_local(gx,y,lx,ly,to_ocean); };
     (void)is_ocean;                               // (used by later stages; silence unused if a stage is lifted out)
 
-    fd = rd::Array2D<int8_t>(dem.width(), dem.height(), rd::NO_FLOW);   // deps/outlets are ctx members (aliased)
-    dh::FloodAndAssignDepressions<float,rd::Topology::D8>(dem, label, fd, deps, outlets, /*permit_without_baselevel_seed=*/true);
-
-    // Namespace remap (eng-doc component 6): gather per-tile depression counts to rank 0,
-    // prefix-sum into global offsets, scatter each rank its offset. This is the shim analogue
-    // of MPI_Allgather(count) + prefix sum -- O(ntiles) tiny messages, no per-cell data.
-    const int mycount = (int)deps.size() - 1;
-    myoffset = 1;
-    if(r==0){
-      std::vector<int> counts(ntiles); counts[0]=mycount;
-      for(int t=1;t<ntiles;t++) c::CommRecv(counts[t], t, TAG_COUNT);
-      dh_label_t off = 1;
-      for(int t=0;t<ntiles;t++){                                  // prefix sum in tile order
-        const dh_label_t this_off = off; off += counts[t];
-        if(t==0) myoffset = this_off; else c::CommSend(this_off, t, TAG_OFFSET);
-      }
-      n_global_r0 = off;                                          // 1 + total depressions across tiles
-    } else {
-      c::CommSend(mycount, 0, TAG_COUNT);
-      c::CommRecv(myoffset, 0, TAG_OFFSET);
-    }
-
-    // Map this rank's local labels into the global namespace (its own slice; no gather).
-    glab = rd::Array2D<dh_label_t>(w, H);
-    for(int y=0;y<H;y++) for(int x=0;x<w;x++) glab(x,y) = gmap(label(x,y), myoffset);
+    flood_tile(ctx);                              // Phase A/B/C on this tile's own columns
+    remap_namespace(ctx, n_global_r0);            // per-tile counts -> global offsets (ctx.myoffset)
+    build_global_labels(ctx);                     // this rank's slice into the global namespace (ctx.glab)
 
     // ---- distributed conduit resolution (eng-doc section 2, v1 gather-and-resolve) ----
     // PHASE 1 (LOCAL): walk each BOUNDARY cell along this tile's own fd to a local terminal
@@ -928,7 +942,7 @@ int main(int argc, char **argv){
     dist[r].glab  = std::move(glab);
     dist[r].glab_pc = std::move(glab_pc);
     dist[r].nboundary = ctx.nboundary;
-    dist[r].ndep  = mycount;
+    dist[r].ndep  = (int)deps.size() - 1;
     dist[r].offset= myoffset;
     c::CommBarrier();
   };
