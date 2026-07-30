@@ -172,6 +172,31 @@ static void build_tiles(StitchState &st){
   st.n_global = next_offset;
 }
 
+// Stage 2: assemble the global depression list G and the global label grid gLabel by remapping each
+// tile's local labels into the global namespace (Tile::g). BOUNDARY cells stay unresolved here.
+static void assemble_globals(StitchState &st){
+  const auto& full=st.full; auto& tiles=st.tiles; const dh_label_t n_global=st.n_global;
+  auto& G=st.G; auto& gLabel=st.gLabel;
+  G = dh::DepressionHierarchy<float>(n_global);
+  G[0] = tiles[0].deps[0];
+  G[0].dep_label = 0;
+  for(auto &tile : tiles)
+    for(dh_label_t k=1;k<tile.deps.size();k++){
+      auto d = tile.deps[k];
+      d.dep_label = tile.g(k);
+      if(d.pit_cell!=dh::NO_VALUE){
+        int lx,ly; tile.dem.iToxy(d.pit_cell, lx, ly);
+        d.pit_cell = full.xyToI(tile.x0 + lx, ly);
+      }
+      G[tile.g(k)] = d;
+    }
+  gLabel = rd::Array2D<dh_label_t>(full.width(), full.height(), OCEAN);
+  for(auto &tile : tiles)
+    for(int y=0;y<tile.dem.height();y++)
+      for(int x=0;x<tile.dem.width();x++)
+        gLabel(tile.x0 + x, y) = tile.g(tile.label(x, y));
+}
+
 int main(int argc, char **argv){
   if(argc!=4 && argc!=5){
     std::cout<<"Syntax: "<<argv[0]<<" <Input DEM> <Ocean Level> <Split Cols (comma-sep)> [flat halo cap]\n";
@@ -213,25 +238,7 @@ int main(int argc, char **argv){
 
   build_tiles(st);                              // per-tile flood -> st.tiles, st.n_global
 
-  // ---- assemble global depressions + global label grid ----
-  G = dh::DepressionHierarchy<float>(n_global);
-  G[0] = tiles[0].deps[0];
-  G[0].dep_label = 0;
-  for(auto &tile : tiles)
-    for(dh_label_t k=1;k<tile.deps.size();k++){
-      auto d = tile.deps[k];
-      d.dep_label = tile.g(k);
-      if(d.pit_cell!=dh::NO_VALUE){
-        int lx,ly; tile.dem.iToxy(d.pit_cell, lx, ly);
-        d.pit_cell = full.xyToI(tile.x0 + lx, ly);
-      }
-      G[tile.g(k)] = d;
-    }
-  gLabel = rd::Array2D<dh_label_t>(full.width(), full.height(), OCEAN);
-  for(auto &tile : tiles)
-    for(int y=0;y<tile.dem.height();y++)
-      for(int x=0;x<tile.dem.width();x++)
-        gLabel(tile.x0 + x, y) = tile.g(tile.label(x, y));
+  assemble_globals(st);                        // remap tile labels -> global G + gLabel (BOUNDARY unresolved)
 
   // ---- conduit resolution: distributable boundary-graph pass (PARALLEL_DEPHIER_PLAN.md §3) ----
   // A BOUNDARY cell is a through-flowing cell whose drainage leaves its tile; we must
