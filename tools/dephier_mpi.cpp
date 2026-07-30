@@ -491,9 +491,14 @@ static void reconcile_flats(RankCtx &ctx, dh_label_t n_global_r0){
 
       if(std::getenv("DH_HALO_DIAG")){                 // footprint/exercise diagnostic (gated)
         const int Lw=colE.begin()->first, Rwd=colE.rbegin()->first+1;
-        std::cerr<<"HALO-DIAG rank="<<r<<" owned=["<<x0<<","<<x1<<") halo=["<<Lw<<","<<Rwd<<")"
-                 <<" left_tiles="<<(tile_of(std::max(0,Lw))!=r?(r-tile_of(std::max(0,Lw))):0)
-                 <<" right_tiles="<<(Rwd>x1?(tile_of(Rwd-1)-r):0)<<" cols="<<(int)colE.size()<<"/"<<W<<"\n";
+        // Build the whole line then write it once: ranks share stdout, and a single write interleaves
+        // far less than a chain of <<. On stdout (not stderr) so `2>/dev/null` drops richdem progress bars.
+        std::ostringstream os;
+        os<<"HALO-DIAG rank="<<r<<" owned=["<<x0<<","<<x1<<") halo=["<<Lw<<","<<Rwd<<")"
+          <<" left_tiles="<<(tile_of(std::max(0,Lw))!=r?(r-tile_of(std::max(0,Lw))):0)
+          <<" right_tiles="<<(Rwd>x1?(tile_of(Rwd-1)-r):0)
+          <<" owned_cols="<<(x1-x0)<<" held_cols="<<(int)colE.size()<<" W="<<W<<"\n";
+        std::cout<<os.str()<<std::flush;
       }
       // ---- Stitch-style canonicalisation (dephier_stitch.cpp DH_FLAT_PARTITION_REPLAY, proven 107/107) ----
       // A replay basin is identified by rb = its PIT's GLOBAL cell index (pit-index labelling). Its SURVIVOR is
