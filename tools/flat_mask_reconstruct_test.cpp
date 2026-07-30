@@ -24,7 +24,7 @@
 // This test proves (A) == (B) bit-for-bit on a synthetic flat. (C) is validated separately, in
 // the harness, against (B). If this test ever fails, the label<->elevation-adjacency equivalence
 // that ENH-1 relies on has been broken and the distributed flat resolution is unsound.
-#include "dh_flats.hpp"   // resolve_flat_flowdirs (reference) + resolve_flat_flowdirs_option2 (ENH-1)
+#include "dh_flats.hpp"   // ResolveFlatFlowdirs (reference) + ResolveFlatFlowdirsRelaxed (ENH-1)
 
 #include <richdem/common/Array2D.hpp>
 #include <richdem/common/grid_cell.hpp>
@@ -105,13 +105,13 @@ int main(){
     if(mask(i)!=fm_ref(i)) mask_diff++;
     if(lab(i)>0 && fh(i)!=fh_label[lab(i)]) fh_diff++;
   }
-  // Also check the end-to-end flowdir producer: resolve_flat_flowdirs_option2 (the label-free
-  // relaxation form used by ENH-1) must equal the reference resolve_flat_flowdirs, flowdir for flowdir.
+  // Also check the end-to-end flowdir producer: ResolveFlatFlowdirsRelaxed (the label-free
+  // relaxation form used by ENH-1) must equal the reference ResolveFlatFlowdirs, flowdir for flowdir.
   rd::Array2D<int8_t> fa=sd, fb=sd, fc=sd;
-  resolve_flat_flowdirs(dem, fa);            // richdem-based reference (full grid)
-  resolve_flat_flowdirs_option2(dem, fb);    // ENH-1 whole-grid relaxation
+  ResolveFlatFlowdirs(dem, fa);            // richdem-based reference (full grid)
+  ResolveFlatFlowdirsRelaxed(dem, fb);    // ENH-1 whole-grid relaxation
   const std::vector<int> bnds{0, W/3, 2*W/3, W};
-  resolve_flat_flowdirs_option2_tiled(dem, bnds, fc);   // ENH-1 per-tile + seam exchange (driver B)
+  ResolveFlatFlowdirsRelaxedTiled(dem, bnds, fc);   // ENH-1 per-tile + seam exchange (driver B)
   long fd_diff=0, tiled_diff=0;
   for(int i=0;i<(int)fa.size();i++){ if(fa(i)!=fb(i)) fd_diff++; if(fb(i)!=fc(i)) tiled_diff++; }
 

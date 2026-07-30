@@ -28,7 +28,7 @@
 #endif
 #include "dh_canonical.hpp"   // dhtest::canonicalize / invariants (shared with the stitch)
 #include "dh_collapse.hpp"    // CollapseSeamArtifacts            (shared with the stitch)
-#include "dh_flats.hpp"       // resolve_flat_flowdirs[_*]        (shared with the stitch)
+#include "dh_flats.hpp"       // ResolveFlatFlowdirs[_*]        (shared with the stitch)
 #include "dh_outlets.hpp"     // OutletDB / outlet_scan_*         (shared with the stitch, ENH-5)
 
 #include <dephier/dephier.hpp>
@@ -134,7 +134,7 @@ struct Band   { int32_t g0=0, n=0; std::vector<float> e; std::vector<uint8_t> o;
 struct RbLeaf { std::vector<int64_t> rb; std::vector<dh_label_t> leaf;
                 template<class Ar> void serialize(Ar &ar){ ar(rb,leaf); } };
 
-// Seam exchange + convergence for the per-rank flat resolution (dh_flats.hpp resolve_flat_flowdirs_rank).
+// Seam exchange + convergence for the per-rank flat resolution (dh_flats.hpp ResolveFlatFlowdirsRelaxedPerRank).
 // exch(): send my owned edge columns to my seam neighbours and receive theirs into the halos (CommSend is
 // non-blocking in both backends, so send-both-then-recv-both cannot deadlock). any(): OR each rank's
 // "changed?" via a gather to rank 0 + broadcast (no collective primitive), which also barriers the round.
@@ -866,7 +866,7 @@ int main(int argc, char **argv){
     // ENH-1: resolve THIS tile's flats per-rank (bit-identical to serial), holding only the tile + a
     // 1-column halo -- three monotone relaxations with a per-round seam exchange + convergence all-reduce.
     { FlatComm fc{r, ntiles, r>0, r<ntiles-1, TAG_FLAT_L, TAG_FLAT_R, TAG_FLAT_CHG, TAG_FLAT_CONT};
-      resolve_flat_flowdirs_rank(dem, gfix, fc); }
+      ResolveFlatFlowdirsRelaxedPerRank(dem, gfix, fc); }
 
     dist[r].label = std::move(label);                            // ranks write disjoint slots
     dist[r].gfix  = std::move(gfix);
@@ -985,7 +985,7 @@ int main(int argc, char **argv){
   auto s_label = ocean_labels(full, ocean_level);
   rd::Array2D<int8_t> s_fd(W, H, rd::NO_FLOW);
   auto S = dh::GetDepressionHierarchy<float,rd::Topology::D8>(full, s_label, s_fd);
-  resolve_flat_flowdirs(full, s_fd);                     // serial uses the same deterministic flat routing
+  ResolveFlatFlowdirs(full, s_fd);                     // serial uses the same deterministic flat routing
 
   const std::string sig_dist = dhtest::canonicalize(Gdist);
   const std::string sig_serial = dhtest::canonicalize(S);
@@ -1030,10 +1030,10 @@ int main(int argc, char **argv){
   std::cout<<(vol_ok ? "MPI-VOL-MATCH " : "MPI-VOL-DIFFER ")<<in_name
            <<" ranks="<<ntiles<<" total_dep_vol(serial="<<v_s<<" dist="<<v_d<<")\n";
 
-  // ---- flowdir check: each rank now resolves ITS flats per-rank (ENH-1, resolve_flat_flowdirs_rank in
+  // ---- flowdir check: each rank now resolves ITS flats per-rank (ENH-1, ResolveFlatFlowdirsRelaxedPerRank in
   // rank_main above) using a 1-column seam exchange + convergence all-reduce -- so no rank ever holds a
   // full-grid field. Here we only ASSEMBLE the per-rank results for the differential check; the flat pass
-  // no longer runs centrally. Must equal serial (resolve_flat_flowdirs on the full grid), cell for cell. ----
+  // no longer runs centrally. Must equal serial (ResolveFlatFlowdirs on the full grid), cell for cell. ----
   rd::Array2D<int8_t> gFix(W, H, rd::NO_FLOW);
   for(int t=0;t<ntiles;t++){
     const int x0=bounds[t], x1=bounds[t+1];

@@ -22,7 +22,7 @@
 
 #include "dh_canonical.hpp"
 #include "dh_collapse.hpp"   // CollapseSeamArtifacts       (shared with tools/dephier_mpi.cpp)
-#include "dh_flats.hpp"      // resolve_flat_flowdirs[_*]   (shared with tools/dephier_mpi.cpp)
+#include "dh_flats.hpp"      // ResolveFlatFlowdirs[_*]   (shared with tools/dephier_mpi.cpp)
 #include "dh_outlets.hpp"    // OutletDB / outlet_scan_*    (shared with tools/dephier_mpi.cpp, ENH-5)
 
 #include <dephier/dephier.hpp>
@@ -314,7 +314,7 @@ int main(int argc, char **argv){
   // Flat cells: replace the flood's order-dependent claim with Barnes-2014 resolve_flats
   // (deterministic from geometry -> agrees with serial). MOVE 2: footprint-bounded, per-tile
   // resolve_flats with an adaptive boundary halo (no full grid); bit-identical to full-grid.
-  const int flat_capped = resolve_flat_flowdirs_distributed(full, bounds, gFix, halo_cap);
+  const int flat_capped = ResolveFlatFlowdirsAdaptiveHalo(full, bounds, gFix, halo_cap);
   if(flat_capped) std::cerr<<"flat resolution: "<<flat_capped<<" tile(s) hit the halo cap ("<<halo_cap
                            <<") -- valid but possibly not serial-identical in giant-flat interiors\n";
 
@@ -534,7 +534,7 @@ int main(int argc, char **argv){
   auto S = dh::GetDepressionHierarchy<float,rd::Topology::D8>(full, s_label, s_fd);
   // Serial reference uses the same deterministic flat routing (the proposed DH change:
   // resolve_flats instead of the flood's flat byproduct). The tree is untouched.
-  resolve_flat_flowdirs(full, s_fd);
+  ResolveFlatFlowdirs(full, s_fd);
 
   // ---- flowdir check: the fixed-up tiled flowdirs must equal serial's, cell for cell ----
   bool flowdir_ok = true;
