@@ -172,6 +172,62 @@ static void build_tiles(StitchState &st){
   st.n_global = next_offset;
 }
 
+// Stage 3: conduit resolution (PARALLEL_DEPHIER_PLAN.md §3). A BOUNDARY cell is a through-flowing
+// cell whose drainage leaves its tile; find the real depression (or ocean) it ends in WITHOUT walking
+// the full grid. Phase 1 (per tile, LOCAL): follow the tile's own flowdirs from each BOUNDARY cell to
+// a tile-local terminal or a seam exit. Phase 2 (CHAIN): follow those exits across tiles until a
+// terminal, reading only the O(boundary) Phase-1 results plus edge labels -- never another tile's
+// interior. Order-independent; the resolved global labels are written into gLabel together at the end.
+static void resolve_conduits(StitchState &st){
+  const auto& full=st.full; const auto& bounds=st.bounds; const int ntiles=st.ntiles;
+  auto& tiles=st.tiles; auto& gLabel=st.gLabel;
+  const auto tile_of=[&](int x){ return st.tile_of(x); };
+  const auto drain=[&](int x,int y,int &lx,int &ly,bool &to_ocean){ return st.drain(x,y,lx,ly,to_ocean); };
+    struct LW { bool terminal; dh_label_t label; int ex, ey; };   // terminal label, else exit target (global x,y)
+    const auto localwalk = [&](int t, int gx, int gy)->LW {
+      const auto &tile = tiles[t];
+      for(unsigned guard=0; guard<=tile.label.size(); guard++){
+        const dh_label_t ll = tile.label(gx - tile.x0, gy);
+        if(ll!=BOUNDARY) return { true, tile.g(ll), 0, 0 };         // local depression or ocean
+        const int fd = tile.fd(gx - tile.x0, gy);
+        if(fd!=rd::NO_FLOW){ gx += rd::d8x[fd]; gy += rd::d8y[fd]; } // stays within the tile
+        else {                                                      // seam seed: cross the strip
+          int nx,ny; bool to_ocean;
+          if(!drain(gx,gy,nx,ny,to_ocean) || to_ocean) return { true, OCEAN, 0, 0 };
+          return { false, OCEAN, nx, ny };                          // hand off to the neighbour tile
+        }
+      }
+      return { true, OCEAN, 0, 0 };                                 // safety net (no cycle expected)
+    };
+
+    // Phase 1: each tile resolves its own BOUNDARY cells with a tile-local walk.
+    std::map<std::pair<int,int>, LW> res;
+    for(int t=0;t<ntiles;t++)
+      for(int y=0;y<full.height();y++)
+        for(int gx=tiles[t].x0; gx<bounds[t+1]; gx++)
+          if(tiles[t].label(gx - tiles[t].x0, y)==BOUNDARY)
+            res[{gx,y}] = localwalk(t, gx, y);
+
+    // Phase 2: chain exits through the published results until a terminal.
+    const auto chase = [&](int gx, int gy)->dh_label_t {
+      for(unsigned guard=0; guard<=res.size()+1; guard++){
+        const LW &r = res.at({gx,gy});
+        if(r.terminal) return r.label;
+        const int nt = tile_of(r.ex);
+        const dh_label_t nl = tiles[nt].label(r.ex - tiles[nt].x0, r.ey);
+        if(nl!=BOUNDARY) return tiles[nt].g(nl);   // entry cell is itself a terminal
+        gx = r.ex; gy = r.ey;                       // else it is a BOUNDARY cell -> chain on its result
+      }
+      return OCEAN;
+    };
+    std::vector<std::pair<int,int>> bcells;
+    bcells.reserve(res.size());
+    for(const auto &kv : res) bcells.push_back(kv.first);
+    std::vector<dh_label_t> resolved(bcells.size());
+    for(size_t i=0;i<bcells.size();i++) resolved[i] = chase(bcells[i].first, bcells[i].second);
+    for(size_t i=0;i<bcells.size();i++) gLabel(bcells[i].first, bcells[i].second) = resolved[i];
+}
+
 // Stage 2: assemble the global depression list G and the global label grid gLabel by remapping each
 // tile's local labels into the global namespace (Tile::g). BOUNDARY cells stay unresolved here.
 static void assemble_globals(StitchState &st){
@@ -240,67 +296,7 @@ int main(int argc, char **argv){
 
   assemble_globals(st);                        // remap tile labels -> global G + gLabel (BOUNDARY unresolved)
 
-  // ---- conduit resolution: distributable boundary-graph pass (PARALLEL_DEPHIER_PLAN.md §3) ----
-  // A BOUNDARY cell is a through-flowing cell whose drainage leaves its tile; we must
-  // find the real depression (or ocean) it ends in WITHOUT walking the full grid.
-  //   Phase 1 (per tile, LOCAL): follow the tile's OWN flowdirs from each BOUNDARY cell
-  //     to a tile-local terminal (a depression/ocean -> its global label) or a seam exit
-  //     (the cross-seam cell it hands off to). Touches only tiles[t].label / tiles[t].fd
-  //     and the 1-cell cross-seam neighbour via drain() -- the perimeter strip a rank
-  //     already exchanges. A tile's own fd never points across a seam (FloodAndAssignDepressions sees only
-  //     in-tile neighbours), so the walk stays in-tile until it terminates or hits a
-  //     NO_FLOW seam seed, where it crosses.
-  //   Phase 2 (CHAIN): follow those exits across tiles until a terminal. Conduit paths
-  //     are shallow (measured <= 6 tile-crossings even at 8 tiles), so this converges in
-  //     a few hops, reading only the O(boundary) Phase-1 results plus edge labels --
-  //     never another tile's interior. Order-independent: Phase-1 walks the unmodified
-  //     tile labels; the resolved global labels are written into gLabel together at the
-  //     end. This is the footprint-bounded form of what a single full-grid walk did.
-  {
-    struct LW { bool terminal; dh_label_t label; int ex, ey; };   // terminal label, else exit target (global x,y)
-    const auto localwalk = [&](int t, int gx, int gy)->LW {
-      const auto &tile = tiles[t];
-      for(unsigned guard=0; guard<=tile.label.size(); guard++){
-        const dh_label_t ll = tile.label(gx - tile.x0, gy);
-        if(ll!=BOUNDARY) return { true, tile.g(ll), 0, 0 };         // local depression or ocean
-        const int fd = tile.fd(gx - tile.x0, gy);
-        if(fd!=rd::NO_FLOW){ gx += rd::d8x[fd]; gy += rd::d8y[fd]; } // stays within the tile
-        else {                                                      // seam seed: cross the strip
-          int nx,ny; bool to_ocean;
-          if(!drain(gx,gy,nx,ny,to_ocean) || to_ocean) return { true, OCEAN, 0, 0 };
-          return { false, OCEAN, nx, ny };                          // hand off to the neighbour tile
-        }
-      }
-      return { true, OCEAN, 0, 0 };                                 // safety net (no cycle expected)
-    };
-
-    // Phase 1: each tile resolves its own BOUNDARY cells with a tile-local walk.
-    std::map<std::pair<int,int>, LW> res;
-    for(int t=0;t<ntiles;t++)
-      for(int y=0;y<full.height();y++)
-        for(int gx=tiles[t].x0; gx<bounds[t+1]; gx++)
-          if(tiles[t].label(gx - tiles[t].x0, y)==BOUNDARY)
-            res[{gx,y}] = localwalk(t, gx, y);
-
-    // Phase 2: chain exits through the published results until a terminal.
-    const auto chase = [&](int gx, int gy)->dh_label_t {
-      for(unsigned guard=0; guard<=res.size()+1; guard++){
-        const LW &r = res.at({gx,gy});
-        if(r.terminal) return r.label;
-        const int nt = tile_of(r.ex);
-        const dh_label_t nl = tiles[nt].label(r.ex - tiles[nt].x0, r.ey);
-        if(nl!=BOUNDARY) return tiles[nt].g(nl);   // entry cell is itself a terminal
-        gx = r.ex; gy = r.ey;                       // else it is a BOUNDARY cell -> chain on its result
-      }
-      return OCEAN;
-    };
-    std::vector<std::pair<int,int>> bcells;
-    bcells.reserve(res.size());
-    for(const auto &kv : res) bcells.push_back(kv.first);
-    std::vector<dh_label_t> resolved(bcells.size());
-    for(size_t i=0;i<bcells.size();i++) resolved[i] = chase(bcells[i].first, bcells[i].second);
-    for(size_t i=0;i<bcells.size();i++) gLabel(bcells[i].first, bcells[i].second) = resolved[i];
-  }
+  resolve_conduits(st);                        // resolve BOUNDARY cells across seams -> gLabel
 
   // ---- flowdir fix-up: restore serial-identical per-cell flowdirs at seam crossings ----
   // A tile flood cannot point a cell across its own boundary, so a cell whose true
