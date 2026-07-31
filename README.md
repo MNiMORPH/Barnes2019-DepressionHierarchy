@@ -130,6 +130,11 @@ to serial (`flat_diff=0`). The small tree-node differences at 2 and 4 tiles are 
 `ocean_linked` nesting order at tied outlets (a documented tie-break class, volume-
 preserving); the 3-tile decomposition is byte-for-byte identical.
 
+How the build is validated at *every* scale — bit-identity against serial where serial
+can run, and split-invariance where it can't — is written up in `VALIDATION.md`. The
+footprint-vs-exactness run modes (default / uncapped replay / capped replay) and how to
+choose among them are in `BENCHMARKS.md`.
+
 **Reproduce:**
 
     python3 examples/corsica/make_corsica.py                 # regenerate corsica.tif from the WTM clip
