@@ -488,7 +488,10 @@ static void print_usage(const char *prog){
     "  DH_AUDIT_OUTLETS          Diff the re-derived outlet set against the per-tile\n"
     "                            flood's own outlets (drift check).\n"
     "  DH_AUDIT_VS_SERIAL        Diff the tiled outlet set against a fresh serial\n"
-    "                            flood's outlets (tie-break diagnostics).\n";
+    "                            flood's outlets (tie-break diagnostics).\n"
+    "\n"
+    "See BENCHMARKS.md (\"Choosing a mode\") for the footprint-vs-exactness trade-off among the default\n"
+    "(no replay), uncapped replay, and capped replay modes, and how to pick a halo cap.\n";
 }
 
 int main(int argc, char **argv){

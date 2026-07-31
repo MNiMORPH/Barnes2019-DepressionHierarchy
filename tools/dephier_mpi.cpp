@@ -813,7 +813,10 @@ static void print_usage(const char *prog){
     "  DH_FLAT_PARTITION_REPLAY  Reproduce serial's EXACT flat-label partition across\n"
     "                            seams, so the tree is bit-identical to serial (not\n"
     "                            just volume-correct). Default off.\n"
-    "  DH_HALO_DIAG              Print each rank's flat-replay halo footprint.\n";
+    "  DH_HALO_DIAG              Print each rank's flat-replay halo footprint.\n"
+    "\n"
+    "See BENCHMARKS.md (\"Choosing a mode\") for the footprint-vs-exactness trade-off among the default\n"
+    "(no replay), uncapped replay, and capped replay modes, and how to pick a halo cap.\n";
 }
 
 int main(int argc, char **argv){

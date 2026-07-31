@@ -1,5 +1,30 @@
 # Benchmarks
 
+## Choosing a mode: footprint vs. exactness
+
+The distributed build has three run modes, trading per-rank memory footprint against how closely the
+result reproduces the serial tree. **Pick by whether the grid fits in one rank's memory and whether you
+need bit-identity — not by defaulting to "most exact".** The flat-label replay is *opt-in*
+(`DH_FLAT_PARTITION_REPLAY`); the halo cap is the optional 4th CLI argument.
+
+| mode | invoke | tree vs. serial | per-rank footprint | use when |
+|------|--------|-----------------|--------------------|----------|
+| **default** (no replay) | (flag off) | **volume-correct + valid**, not bit-identical (flat cells may fall in a different valid leaf) | **bounded**: `O(N/P) + O(boundary)` (1-column halo) | **production at scale** — grids too big for one rank; volume-correctness is enough |
+| **uncapped replay** | `DH_FLAT_PARTITION_REPLAY=1`, no cap | **bit-identical** | **unbounded**: the adaptive halo grows to basin extent, ~O(W) — a rank can hold most of the grid | you need bit-identity **and** the grid fits in one rank (validation; small/medium DEMs) |
+| **capped replay** | `…=1` + cap arg | valid + volume-correct; bit-identity is *jagged* in the cap (see below) | **bounded**: `held_cols = owned_cols + 2·cap` | you want maximal exactness **and** it must fit at scale — the narrow niche the cap exists for |
+
+**The trap to avoid: "just always use uncapped."** Uncapped is exact, but it re-introduces the O(N)
+per-rank footprint the distributed design set out to avoid — on a large, flat-heavy grid (e.g. GEBCO 30″
+with the Caspian / Great Lakes) a rank's halo can swell toward the whole grid and **OOM the rank**,
+defeating the point of distributing. Uncapped is the right choice *only when memory allows*.
+
+**Rule of thumb:**
+- Grid fits in one rank, or you need bit-identity → **uncapped replay** (or just run serial).
+- Grid does not fit and volume-correctness suffices → **default (no replay)** — the scalable path.
+- Grid does not fit and you want near-exactness → **capped replay**, accepting that a finite cap gives a
+  valid, volume-correct tree whose *exact* signature (and, under an aggressive cap, node count) is not
+  guaranteed. Only `VOL-MATCH` is guaranteed; see the sweep below for how to pick a cap for a given DEM.
+
 ## Footprint sweep — distributed flat-label replay (`DH_FLAT_PARTITION_REPLAY`)
 
 **What & why.** The distributed DepressionHierarchy build's design goal is a *footprint-bounded* per-rank
