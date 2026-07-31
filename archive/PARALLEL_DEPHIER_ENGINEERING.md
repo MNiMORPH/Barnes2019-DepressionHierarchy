@@ -6,7 +6,7 @@ remaining work: turning the validated in-process algorithm into a real MPI build
 expansion of `PARALLEL_DEPHIER_PLAN.md` §9 step 5 ("MPI harness"), which that plan treats as one line.
 
 Everything here is *engineering*, not research: every novel algorithm is already proven in
-`tools/dephier_stitch.cpp` against the canonical oracle. The risk now is in the transport layer and the
+`../tools/dephier_stitch.cpp` against the canonical oracle. The risk now is in the transport layer and the
 distributed protocols, not in whether the stitch is correct.
 
 ---
@@ -31,7 +31,7 @@ The single "MPI harness" line is really nine components. In dependency order, wi
 
 ## 2. Distributed conduit resolution — MPI protocol
 
-The in-process pass (`tools/dephier_stitch.cpp`, "conduit resolution") is two phases: (1) per-tile-local
+The in-process pass (`../tools/dephier_stitch.cpp`, "conduit resolution") is two phases: (1) per-tile-local
 `localwalk` reduces each BOUNDARY cell to a terminal or a seam exit; (2) `chase` follows exits across
 tiles until a terminal. Measured shape (instrumentation, since reverted): BOUNDARY cells O(boundary)
 (~300–2800 per seam), conduit paths ≤ 6 tile-crossings even at 8 tiles. This is a **shallow boundary
@@ -144,7 +144,7 @@ machinery, and only extend the centralized resolution payload. This is worth con
 
 Measured on real GEBCO 30″ tiles (converted `gebco_08.nc` → GeoTIFF; contrasting terrains cut with
 `gdal_translate -srcwin`; sea `z≤0` and the 1-cell border ring opened to ocean so each tile has a base
-level; `tools/dephier_stats` on the unmodified serial `GetDepressionHierarchy`). Depression *density* =
+level; `../tools/dephier_stats` on the unmodified serial `GetDepressionHierarchy`). Depression *density* =
 depressions per land cell:
 
 | Tile (15°-wide unless noted) | land cells | depressions | density | tree bytes/land-cell |
@@ -278,7 +278,7 @@ seams). Caveats: mesas (flats with no low edge) — `resolve_flats` handles them
   test per the numerical-model workflow. *Footprint caveat:* the halo is bounded by the flat's cross-seam
   **extent**, not strictly O(boundary).
 
-**Managing the halo caveat — measured on real GEBCO 30″** (`tools/dephier_flat_extent`, same tile
+**Managing the halo caveat — measured on real GEBCO 30″** (`../tools/dephier_flat_extent`, same tile
 extraction as §4). The flat-size distribution is **heavy-tailed**: ~99% of flats are ≤ 16 cells across
 (halo trivial), but a tail of large lakes/wetlands reaches **hundreds of cells** — worst-case bbox
 dimension (= worst-case halo) per contrasting tile: Sahara 95, Australia 111, Great Basin 143, W. Siberia
@@ -299,7 +299,7 @@ dimension (= worst-case halo) per contrasting tile: Sahara 95, Australia 111, Gr
   **Decision (updated):** ship the adaptive halo **with a halo cap = option 3 (DONE)** so the problem is
   *bounded for any input first*, then size MPI tiles from the measurement, then add option 2 (bit-identity
   on the capped cases) as an optimization whenever — on the MPI machinery it shares (see the enhancement
-  in `ENHANCEMENTS.md`).
+  in `../ENHANCEMENTS.md`).
 
 **Option 3 — DONE (the backstop that bounds the problem).** `resolve_flat_flowdirs_distributed` takes a
 `halo_cap`: the halo grows until the owned region stabilizes (bit-identical) OR the cap, whichever first.
@@ -312,5 +312,5 @@ interior routing). Default cap is unlimited (grows to the full grid = exact), so
 bit-identical (1521/1521); a production build sets the cap from `dephier_flat_extent`. CLI: optional 4th
 arg to `dephier_stitch`.
 
-With option 3 in place the flat problem is **bounded for all inputs**; option 2 (below / `ENHANCEMENTS.md`)
+With option 3 in place the flat problem is **bounded for all inputs**; option 2 (below / `../ENHANCEMENTS.md`)
 is a bit-identity optimization to graft in later, not a prerequisite.

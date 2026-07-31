@@ -6,8 +6,8 @@
 **Model:** Barnes (2016), *Parallel Priority-Flood* — tile locally, reconcile at boundaries —
 generalized from reconciling fill **levels** to stitching the depression **hierarchy**.
 
-This plan is grounded in a close read of `include/dephier/dephier.hpp` (the serial build),
-`include/dephier/DisjointDenseIntSet.hpp` (the union-find), and the existing test/driver code.
+This plan is grounded in a close read of `../include/dephier/dephier.hpp` (the serial build),
+`../include/dephier/DisjointDenseIntSet.hpp` (the union-find), and the existing test/driver code.
 Line references below point at the code as it stands on the fork's `master`.
 
 ---
@@ -135,7 +135,7 @@ published results (the analogue of Barnes' 2016 boundary-graph step, applied to 
 reads another tile's interior, so per-rank footprint is O(N/P) + O(boundary). Validated bit-identical
 to serial: 1521/1521 MATCH across the fractal sweep, benign, and pit-on-seam fixtures.
 
-**Verified against Barnes' own 2016 implementation** (`submodules/richdem/programs/parallel_priority_flood/main.cpp`).
+**Verified against Barnes' own 2016 implementation** (`../submodules/richdem/programs/parallel_priority_flood/main.cpp`).
 This is not reconstructed from the paper — it is his reference code, and the cross-tile rule above is
 line-for-line what he does:
 - **Perimeter strips, not a halo.** Each tile exports its 1-cell perimeter of `(elevation, label)` —
@@ -252,7 +252,7 @@ build already exchanges. Each artifact appears in one of two forms, by where its
 needs the recursive subtree-dissolve generalisation of form 2, not yet built.)*
 
 **Status — BUILT & VALIDATED (2026-07-26).** `CollapseSeamArtifacts(G, full, bounds)` in
-`tools/dephier_stitch.cpp`, run after `PhaseCD`. The concrete trigger was a **seam-straddling flat**:
+`../tools/dephier_stitch.cpp`, run after `PhaseCD`. The concrete trigger was a **seam-straddling flat**:
 the fractal `--size 200 --beta 1.7 --seed 4` DEM at split 142, tie `{(141,182),(142,183)}=633.752`
 draining out via `(142,183)→(143,183)` — one tile sees its half as a zero-height pit, ocean-linked into
 its real container. The pass leaves genuine basins untouched (**zero over-collapses**; ≈2 artifacts per
@@ -329,7 +329,7 @@ minimal edits.
 
 ## 6. The oracle — which must be *built*, not assumed
 
-**Correction to the design note (§4/§5):** it treats `src/dephier_paper_tests.cpp` as "the repo's
+**Correction to the design note (§4/§5):** it treats `../src/dephier_paper_tests.cpp` as "the repo's
 correctness tests / the oracle." In fact that program (built via `CMakeLists.txt:21`) and
 `run_tests.sh` form a **crash-only smoke test**: they run the *serial* build on 26 small DEMs
 (`test_cases/*.dem`) and write CSV/label outputs, with `set -e` catching only crashes. Nothing
@@ -363,7 +363,7 @@ So a first-class deliverable is the **differential tester**:
 6. **On-edge (seam-hugging) depression fixtures — the halo decision, RESOLVED: no halo.** Barnes'
    perimeter-strip join uses no halo (§3), so the one case it may miss is a basin whose low cells
    straddle a tile seam: both halves drain to the seam → both become `BOUNDARY` → the basin appears in
-   *neither* tile's depression list (§ "Q2 hard edges"). The `tools/make_edge_depression_dem.py` `seam`
+   *neither* tile's depression list (§ "Q2 hard edges"). The `../tools/make_edge_depression_dem.py` `seam`
    fixture (pit **exactly on the seam**) plus `offset`/`interior` controls forces the verdict. **Result:
    the strip suffices.** The basin is not missing — volume is conserved; the stitch rebuilds it as a meta
    over the two tile-half artifact leaves, which §3.2's collapse dissolves into the serial-identical
@@ -466,7 +466,7 @@ way — a "does not fit" result is the finding that redirects the architecture.
 2. **Centralized vs. distributed Phase C (§2).** Given decadal rebuild cadence, is a serial
    reconciliation acceptable for v1, deferring the fully-distributed 2016 join until §8 says we must?
 3. **Reuse of the 2016 join code — found (§3).** Your parallel-priority-flood reference code is in
-   `submodules/richdem/programs/parallel_priority_flood/main.cpp`, and we intend to build the stitch
+   `../submodules/richdem/programs/parallel_priority_flood/main.cpp`, and we intend to build the stitch
    on its `A2Array2D`/`Layoutfile` tiling + `HandleEdge`/`label_offset` join rather than writing
    fresh. Is `A2Array2D` the right base to carry an extra per-cell depression-label channel through,
    or is there a newer/preferred tiling layer we should target?

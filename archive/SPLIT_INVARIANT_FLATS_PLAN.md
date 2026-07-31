@@ -6,7 +6,7 @@
 > (`DH_CONTAINMENT_CCPASS`, validated-negative — it computes drainage, but serial's flat label is flood
 > membership). The approach that shipped is the flat-partition **replay** (`DH_FLAT_PARTITION_REPLAY`), now
 > the primary path, distributed per-rank in `dephier_mpi` as **ENH-8**. Current state lives in
-> `ENHANCEMENTS.md` (ENH-7/ENH-8) and `RICHARD_REVIEW_NOTES.md`; kept here as the dead-end record.
+> `../ENHANCEMENTS.md` (ENH-7/ENH-8) and `../RICHARD_REVIEW_NOTES.md`; kept here as the dead-end record.
 
 > **FULL IDENTITY IS ONE OUTLET-TIE-BREAK AWAY — root cause found + PROVEN (2026-07-29).** After the replay
 > closed the cell-assignment class (73→79/107 MATCH), characterized the 28 residual DIFFERs: all are
@@ -118,7 +118,7 @@
 > **COMMITTED & SAFE:** source-1 early floor-flat unification (`010c4a4`, flag DH_SPLIT_INVARIANT_FLATS) +
 > collapse meta-over-halves retirement warning (`3e28f7c`). Default OFF byte-identical (suite 23/23). The
 > flag drives the seam-dependent meta-over-halves collapse (Pass B/B2) to 0 on floor-straddle flats. Also
-> committed this arc: STITCH-SIG split-invariance metric + `tools/check_split_invariance.sh` (`98c7613`).
+> committed this arc: STITCH-SIG split-invariance metric + `../tools/check_split_invariance.sh` (`98c7613`).
 >
 > **FULL SPLIT-INVARIANCE MAP (flag OFF):** 8/28 fixtures SPLIT-VARIANT, ALL volume-correct:
 > kerry_test 1,2,4,5,9,10,11,12. Source-1 flag alone makes NONE of them invariant (variance dominated by
@@ -170,7 +170,7 @@
 An **opt-in** mode (flag) in which the tiled DepressionHierarchy is **split-invariant**: `STITCH-SIG`
 identical across tilings for every DEM. Trades speed + complexity for reproducibility/safety (Andy's call).
 Acceptance:
-- kerry_test2/10/11 (currently SPLIT-VARIANT) become SPLIT-INVARIANT (`tools/check_split_invariance.sh`).
+- kerry_test2/10/11 (currently SPLIT-VARIANT) become SPLIT-INVARIANT (`../tools/check_split_invariance.sh`).
 - kerry_test3/7/12 stay SPLIT-INVARIANT; all current `STITCH-MATCH` cases stay MATCH.
 - **Flag OFF ⇒ byte-identical to today** (suite 23/23 unchanged).
 
@@ -220,7 +220,7 @@ before coding; the last approach failed for lack of that grounding.
   outlet-cell tie on the flat rim resolved against the canonical pit). Iterate to SPLIT-INVARIANT.
 - **S5 — productionise.** env flag → real CLI flag (e.g. `--split-invariant-flats`); confirm OFF is
   byte-identical (suite 23/23); add `split_invariance_kerry2/10/11` CTests asserting invariance ON; commit
-  granularly. Update ENHANCEMENTS.md ENH-7 + issue #3.
+  granularly. Update ../ENHANCEMENTS.md ENH-7 + issue #3.
 
 ## Guardrails
 - Flag OFF is the default and must not change any output.

@@ -6,8 +6,8 @@ replacement for the richdem-lineage DH that WTM currently vendors, and where is 
 improvable to a caller who already knows the richdem original?*
 
 Written by the WTM-side integrator (Claude, with A. Wickert), 2026-07-29. **Review/opinion only — no
-code changed here.** Companion to `RICHARD_REVIEW_NOTES.md`, `PARALLEL_DEPHIER_DESIGN.md`, and the
-already-parked `ENH-4-area-weighted-volumes.md`.
+code changed here.** Companion to `../RICHARD_REVIEW_NOTES.md`, `PARALLEL_DEPHIER_DESIGN.md`, and the
+already-parked `../ENH-4-area-weighted-volumes.md`.
 
 ## TL;DR
 
@@ -17,7 +17,7 @@ serial wrapper is **not a drop-in** for the richdem/WTM signature today: five AP
 in the way, four of which are choices that would make the API *more familiar to any richdem consumer*,
 not just to WTM. The highest-leverage move is to give the convenience wrapper the **exact richdem
 signature as a superset**, keep the phased API as the new power-user surface, and let WTM eventually
-**delete its vendored `src/dephier.hpp` and consume this header** — converging the two forks instead of
+**delete its vendored `../src/dephier.hpp` and consume this header** — converging the two forks instead of
 maintaining both.
 
 ## Context: WTM vendors its own DH
@@ -55,7 +55,7 @@ WTM's FSM untouched. The one interface that must line up is the `Depression` str
 **On #3 — the honest attribution.** Stock/richdem DH (and therefore this repo) is **cell-weighted** and
 correct on an equal-area grid. The area-weighting is a **WTM-side enhancement** (`WTM/src/dephier.hpp`
 threads a per-cell `cell_area` vector through the volume accumulators), already captured here as the
-parked `ENH-4-area-weighted-volumes.md`. So this is not a local regression; it is a known port. It still
+parked `../ENH-4-area-weighted-volumes.md`. So this is not a local regression; it is a known port. It still
 blocks a *drop-in*, because consuming the local wrapper as-is on a WTM lat/lon grid (E–W width ∝ cos φ)
 yields wrong capacities — the budget will not close. Landing ENH-4 closes it.
 
@@ -104,7 +104,7 @@ moment to also give the convenience wrapper the richdem signature (rec. 1) — o
    already knows. Closes #1 and #4 at once and makes it a recognizable drop-in. (Concrete signature in
    the appendix.)
 2. **Revert `dh_label_t` to `int32_t`.** `uint32_t` is the most surprising change to a richdem reader,
-   and it is a latent bug: `LastLayer` still assigns `-3` (`include/dephier/dephier.hpp:946`), which on a
+   and it is a latent bug: `LastLayer` still assigns `-3` (`../include/dephier/dephier.hpp:946`), which on a
    `uint32_t` wraps to ~4.29e9. Signed labels + a named sentinel is the familiar and correct form.
 3. **Land ENH-4 (area-weighting).** For WTM this is physics, not familiarity — it feeds the
    conservative-flux, machine-zero water budget on non-equal-area grids. Aligning its signature to the
@@ -132,7 +132,7 @@ close on a real lat/lon grid.
 
 Do **not** reconcile by editing WTM's vendored copy. Push recs 1–4 into *this* repo so the serial
 wrapper is a superset-compatible drop-in for the richdem signature. Then WTM's integration reduces to
-"delete `src/dephier.hpp`, point the include at this header, leave `fill_spill_merge.hpp` untouched," and
+"delete `../src/dephier.hpp`, point the include at this header, leave `fill_spill_merge.hpp` untouched," and
 the two headers **converge** instead of forking further. That serves the parallel-DH goal and leaves one
 source of truth.
 
@@ -158,7 +158,7 @@ backward-compatible with the equal-area path.
 
 Every assertion above was checked against source on 2026-07-29 (not recalled). Line references:
 
-**Local DH** (`include/dephier/dephier.hpp`):
+**Local DH** (`../include/dephier/dephier.hpp`):
 - `dh_label_t = uint32_t` — line 31 (gap #2).
 - `LastLayer` assigns `mylabel = -3` where `mylabel` is deduced `uint32_t` (from `label(x,y)`), then
   writes it back to `label` — lines 940, 946, 950. On `uint32_t` this stores ~4.29e9 (rec. 2). A leftover
@@ -182,7 +182,7 @@ Every assertion above was checked against source on 2026-07-29 (not recalled). L
 - `final_label` is **consumed**, not just produced: written in the marginal pass (`dephier.hpp:794`) and
   read at `fill_spill_merge.hpp:536` inside `CalculateWtdVol` (`fill_spill_merge.hpp:202`), the routine that
   builds `wtd_vol`/`wtd_only`.
-- ENH-4 attribution: `ENH-4-area-weighted-volumes.md` ("port of WTM's `cell_area` interface into this
+- ENH-4 attribution: `../ENH-4-area-weighted-volumes.md` ("port of WTM's `cell_area` interface into this
   repo", parked 2026-07-28) — the area-weighting is a WTM enhancement, not a local regression (gap #3).
 
 **Paper** (phase-naming section): Barnes, R., Callaghan, K. L., and Wickert, A. D.: "Computing water flow
