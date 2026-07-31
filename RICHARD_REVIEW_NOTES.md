@@ -1,7 +1,7 @@
 # Notes for Richard — changes to the DepressionHierarchy core
 
-**Context:** distributed-memory DH build on the MNiMORPH fork (see `PARALLEL_DEPHIER_DESIGN.md`,
-`PARALLEL_DEPHIER_PLAN.md`). This file collects the changes to *your* core code
+**Context:** distributed-memory DH build on the MNiMORPH fork (see `archive/PARALLEL_DEPHIER_DESIGN.md`,
+`archive/PARALLEL_DEPHIER_PLAN.md`). This file collects the changes to *your* core code
 (`include/dephier/dephier.hpp`, `include/dephier/radix_heap.hpp`) that warrant your review before any
 upstream merge — especially the ones that **change serial output**. Nothing here has been pushed
 upstream; it lives on the fork's `master`.
@@ -116,7 +116,7 @@ No behavioural change single-threaded; non-GDAL builds unaffected (`#ifdef USEGD
 clean stress runs + our full suite. A branch + PR body are staged against upstream `master` in a fresh
 checkout (`../richdem-gdal-pr`, branch `gdal-register-once`); our fork's submodule already carries the fix.
 
-## Open design questions (co-scoping — full list in PARALLEL_DEPHIER_PLAN.md §10)
+## Open design questions (co-scoping — full list in archive/PARALLEL_DEPHIER_PLAN.md §10)
 
 - **Refinement vs. collapse:** the distributed tree is a *refinement* of the serial one around tile
   boundaries; an O(#depressions) collapse pass recovers a serial-identical tree for analysis. Agree

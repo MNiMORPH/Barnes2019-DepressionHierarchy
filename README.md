@@ -102,7 +102,7 @@ Distributed (parallel) build — worked example: Corsica
 This fork adds a **distributed-memory (MPI) DepressionHierarchy build** so the DH
 can be computed for DEMs too large to hold on one node: the grid is tiled across
 ranks, each rank holds only `O(N/P) + O(boundary)`, and the per-tile results are
-stitched into one hierarchy. See `PARALLEL_DEPHIER_PLAN.md` and `ENHANCEMENTS.md`.
+stitched into one hierarchy. See `archive/PARALLEL_DEPHIER_PLAN.md` and `ENHANCEMENTS.md`.
 
 The example below runs on **Corsica at GEBCO 30″** — the same clip the
 [Water Table Model (WTM)](https://github.com/KCallaghan/WTM) uses for its island

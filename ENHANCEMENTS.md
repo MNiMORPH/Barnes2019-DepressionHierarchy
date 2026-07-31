@@ -26,7 +26,7 @@ this recovers bit-identity on the giant-flat tail without growing per-rank memor
 
 ### Context
 `resolve_flat_flowdirs_distributed` (`tools/dephier_stitch.cpp`) resolves flat flowdirs per tile
-with an **adaptive halo** (PARALLEL_DEPHIER_ENGINEERING.md §6, move 2), capped by **option 3** so
+with an **adaptive halo** (archive/PARALLEL_DEPHIER_ENGINEERING.md §6, move 2), capped by **option 3** so
 footprint is `O(N/P)+O(cap·boundary)` for any input. Consequences of the cap: a flat wider than the
 cap is resolved with a capped halo — a *valid* convergent flow field (same tree, same sinks) but not
 necessarily serial-identical in that flat's deep interior. Measured flat extents on GEBCO 30″

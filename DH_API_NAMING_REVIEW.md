@@ -2,7 +2,7 @@
 
 Internal review of the function surface this fork grew while building the distributed DepressionHierarchy:
 the **core phase functions** (`include/dephier/dephier.hpp`) and the **distributed-build tool helpers**
-(`tools/dh_*.hpp`, `tools/comm_*.hpp`, and the two tool entry points). Companion to `WTM_API_REVIEW.md`,
+(`tools/dh_*.hpp`, `tools/comm_*.hpp`, and the two tool entry points). Companion to `archive/WTM_API_REVIEW.md`,
 which reviews the *core public API from the WTM consumer's outside view*; this one is the authors' inside
 view, focused on **naming consistency and granularity** — the "functions have gotten a bit wild" concern.
 
